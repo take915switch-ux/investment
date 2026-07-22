@@ -52,10 +52,9 @@ selected_names = st.sidebar.multiselect(
 frequency = st.sidebar.radio("頻度", ["日足", "月足"], horizontal=True)
 interval = "1d" if frequency == "日足" else "1mo"
 
-default_start = date.today() - timedelta(days=365 * 3)
+default_start = date(2008, 3, 28)
 
-# min_value を明示しない場合、Streamlit は初期値の10年前を下限にする。
-# そのため初期値が3年前だと、選択可能な最古日は約13年前になってしまう。
+
 start_date = st.sidebar.date_input(
     "開始日",
     value=default_start,
