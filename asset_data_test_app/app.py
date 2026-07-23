@@ -16,6 +16,9 @@ ASSETS = {
     "USD/JPY": "JPY=X",
 }
 
+FX_NAME = "USD/JPY"
+ETF_NAMES = [name for name in ASSETS if name != FX_NAME]
+
 
 def fetch_one(ticker: str, start: date, end: date, interval: str) -> pd.DataFrame:
     # yfinance の end は指定日を含まないため、終了日の翌日を渡す。
@@ -39,6 +42,17 @@ def fetch_one(ticker: str, start: date, end: date, interval: str) -> pd.DataFram
     return data
 
 
+def annualized_statistics(close: pd.Series, periods_per_year: int) -> tuple[float | None, float | None]:
+    """価格系列から算術平均ベースの年平均リターンと年率リスクを返す。"""
+    daily_or_monthly_returns = close.pct_change(fill_method=None).dropna()
+    if daily_or_monthly_returns.empty:
+        return None, None
+
+    annual_return = float(daily_or_monthly_returns.mean() * periods_per_year)
+    annual_risk = float(daily_or_monthly_returns.std() * (periods_per_year**0.5))
+    return annual_return, annual_risk
+
+
 st.title("市場データ取得テスト")
 st.caption("Yahoo Finance から各資産の価格データを取得できるか確認します。")
 
@@ -51,6 +65,7 @@ selected_names = st.sidebar.multiselect(
 
 frequency = st.sidebar.radio("頻度", ["日足", "月足"], horizontal=True)
 interval = "1d" if frequency == "日足" else "1mo"
+periods_per_year = 252 if frequency == "日足" else 12
 
 default_start = date(2008, 3, 28)
 
@@ -78,8 +93,9 @@ if run:
         st.error("開始日は終了日以前にしてください。")
         st.stop()
 
-    results = []
     successful = {}
+    result_errors = {}
+    original_missing_counts = {}
 
     with st.spinner("データを取得しています…"):
         for name in selected_names:
@@ -87,19 +103,7 @@ if run:
             try:
                 df = fetch_one(ticker, start_date, end_date, interval)
                 if df.empty or "Close" not in df.columns:
-                    results.append(
-                        {
-                            "対象": name,
-                            "ティッカー": ticker,
-                            "結果": "データなし",
-                            "件数": 0,
-                            "開始": None,
-                            "終了": None,
-                            "最新値": None,
-                            "欠損数": None,
-                            "エラー": "",
-                        }
-                    )
+                    result_errors[name] = ("データなし", "")
                     continue
 
                 close = df["Close"].dropna()
@@ -107,33 +111,67 @@ if run:
                     raise ValueError("終値データがありません。")
 
                 successful[name] = close.rename(name)
-                results.append(
-                    {
-                        "対象": name,
-                        "ティッカー": ticker,
-                        "結果": "成功",
-                        "件数": len(close),
-                        "開始": close.index.min(),
-                        "終了": close.index.max(),
-                        "最新値": float(close.iloc[-1]),
-                        "欠損数": int(df["Close"].isna().sum()),
-                        "エラー": "",
-                    }
-                )
+                original_missing_counts[name] = int(df["Close"].isna().sum())
             except Exception as exc:
-                results.append(
-                    {
-                        "対象": name,
-                        "ティッカー": ticker,
-                        "結果": "失敗",
-                        "件数": 0,
-                        "開始": None,
-                        "終了": None,
-                        "最新値": None,
-                        "欠損数": None,
-                        "エラー": str(exc),
-                    }
-                )
+                result_errors[name] = ("失敗", str(exc))
+
+    # USD/JPY は、取得できた株式ETFすべてに共通する取引日のみに揃える。
+    # USD/JPYだけを選択した場合は基準日がないため、取得した日付をそのまま使う。
+    available_etfs = [name for name in ETF_NAMES if name in successful]
+    if FX_NAME in successful and available_etfs:
+        common_etf_dates = successful[available_etfs[0]].index
+        for name in available_etfs[1:]:
+            common_etf_dates = common_etf_dates.intersection(successful[name].index)
+        successful[FX_NAME] = successful[FX_NAME].reindex(common_etf_dates).dropna()
+
+        if successful[FX_NAME].empty:
+            del successful[FX_NAME]
+            result_errors[FX_NAME] = (
+                "データなし",
+                "株式ETFの共通取引日に一致するUSD/JPYデータがありません。",
+            )
+
+    results = []
+    for name in selected_names:
+        ticker = ASSETS[name]
+        if name not in successful:
+            result, error = result_errors.get(name, ("データなし", ""))
+            results.append(
+                {
+                    "対象": name,
+                    "ティッカー": ticker,
+                    "結果": result,
+                    "件数": 0,
+                    "開始": None,
+                    "終了": None,
+                    "最新値": None,
+                    "欠損数": None,
+                    "年平均リターン": None,
+                    "年率リスク": None,
+                    "エラー": error,
+                }
+            )
+            continue
+
+        close = successful[name]
+        annual_return, annual_risk = annualized_statistics(close, periods_per_year)
+        results.append(
+            {
+                "対象": name,
+                "ティッカー": ticker,
+                "結果": "成功",
+                "件数": len(close),
+                "開始": close.index.min(),
+                "終了": close.index.max(),
+                "最新値": float(close.iloc[-1]),
+                "欠損数": original_missing_counts.get(name, 0),
+                "年平均リターン": (
+                    f"{annual_return:.2%}" if annual_return is not None else None
+                ),
+                "年率リスク": f"{annual_risk:.2%}" if annual_risk is not None else None,
+                "エラー": "",
+            }
+        )
 
     st.subheader("取得結果一覧")
     st.dataframe(pd.DataFrame(results), use_container_width=True, hide_index=True)
