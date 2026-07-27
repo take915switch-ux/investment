@@ -178,13 +178,30 @@ if run:
 
     if successful:
         prices = pd.concat(successful.values(), axis=1).sort_index()
-        chart_data = prices.reset_index().melt(
-            id_vars=prices.index.name or "Date",
-            var_name="対象",
-            value_name="価格",
+
+        # 各アセットについて、設定期間内の最初の有効値を100として指数化する。
+        indexed_prices = prices.apply(
+            lambda series: series / series.dropna().iloc[0] * 100
+            if not series.dropna().empty
+            else series
         )
-        date_column = prices.index.name or "Date"
-        fig = px.line(chart_data, x=date_column, y="価格", color="対象")
+        indexed_prices.index.name = "Date"
+
+        chart_data = indexed_prices.reset_index().melt(
+            id_vars="Date",
+            var_name="対象",
+            value_name="指数",
+        )
+        fig = px.line(
+            chart_data,
+            x="Date",
+            y="指数",
+            color="対象",
+            title=f"各アセットの推移（設定期間の初日＝100・{frequency}）",
+            labels={"Date": "日付", "指数": "初日を100とした指数", "対象": "アセット"},
+        )
+        fig.add_hline(y=100, line_dash="dash")
+        fig.update_layout(hovermode="x unified")
         st.plotly_chart(fig, use_container_width=True)
 
         csv = prices.to_csv().encode("utf-8-sig")
