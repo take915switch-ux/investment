@@ -297,9 +297,33 @@ risk_free_rate_percent = st.sidebar.number_input(
     max_value=20.0,
     value=0.0,
     step=0.1,
-    help="シャープレシオ最大ポートフォリオの計算に使用します。",
+    help="シャープレシオ最大ポートフォリオと現金部分の計算に使用します。",
 )
 risk_free_rate = risk_free_rate_percent / 100
+
+st.sidebar.subheader("指定ポートフォリオ")
+st.sidebar.caption("SPY・GLD・AGG・ACWI・現金の合計を100%にしてください。")
+custom_spy = st.sidebar.number_input("SPY（%）", 0.0, 100.0, 20.0, 1.0)
+custom_gld = st.sidebar.number_input("GLD（%）", 0.0, 100.0, 20.0, 1.0)
+custom_agg = st.sidebar.number_input("AGG（%）", 0.0, 100.0, 20.0, 1.0)
+custom_acwi = st.sidebar.number_input("ACWI（%）", 0.0, 100.0, 20.0, 1.0)
+custom_cash = st.sidebar.number_input("現金（%）", 0.0, 100.0, 20.0, 1.0)
+custom_total = custom_spy + custom_gld + custom_agg + custom_acwi + custom_cash
+st.sidebar.metric("配分合計", f"{custom_total:.1f}%")
+custom_allocation_valid = np.isclose(custom_total, 100.0)
+if not custom_allocation_valid:
+    st.sidebar.warning("配分合計を100%にしてください。")
+
+custom_weights = pd.Series(
+    {
+        "S&P 500 ETF (SPY)": custom_spy / 100,
+        "金 ETF (GLD)": custom_gld / 100,
+        "米国総合債券 ETF (AGG)": custom_agg / 100,
+        "全世界株式 ETF (ACWI)": custom_acwi / 100,
+        "現金": custom_cash / 100,
+    },
+    name="配分比率",
+)
 
 default_start = date(2008, 3, 28)
 start_date = st.sidebar.date_input(
@@ -473,6 +497,46 @@ if run:
         maximum_sharpe = None
         covariance = None
         expected_returns = None
+        custom_return_series = None
+        custom_annual_return = None
+        custom_annual_risk = None
+
+        positive_risky_weights = custom_weights.drop("現金")
+        positive_risky_weights = positive_risky_weights[positive_risky_weights > 0]
+        missing_custom_assets = [
+            name for name in positive_risky_weights.index if name not in returns.columns
+        ]
+
+        if custom_allocation_valid and not missing_custom_assets:
+            if positive_risky_weights.empty:
+                custom_return_series = pd.Series(
+                    0.0, index=returns.dropna(how="all").index, name="指定配分"
+                )
+            else:
+                custom_base = returns[positive_risky_weights.index].dropna(how="any")
+                if not custom_base.empty:
+                    custom_return_series = custom_base.mul(
+                        positive_risky_weights, axis=1
+                    ).sum(axis=1)
+                    custom_return_series.name = "指定配分"
+
+            if custom_return_series is not None:
+                cash_period_return = (1 + risk_free_rate) ** (1 / periods_per_year) - 1
+                custom_return_series = (
+                    custom_return_series + custom_weights["現金"] * cash_period_return
+                )
+                custom_annual_return = float(
+                    custom_return_series.mean() * periods_per_year
+                )
+                custom_annual_risk = float(
+                    custom_return_series.std() * np.sqrt(periods_per_year)
+                )
+
+        if missing_custom_assets:
+            st.warning(
+                "指定ポートフォリオに含めた次の資産を、取得対象にも追加してください: "
+                + "、".join(missing_custom_assets)
+            )
 
         if len(successful) >= 2:
             correlation = returns.corr().round(2)
@@ -571,6 +635,19 @@ if run:
                     )
                 )
 
+                if custom_annual_return is not None and custom_annual_risk is not None:
+                    frontier_fig.add_trace(
+                        go.Scatter(
+                            x=[custom_annual_risk * 100],
+                            y=[custom_annual_return * 100],
+                            mode="markers+text",
+                            text=["指定配分"],
+                            textposition="bottom center",
+                            marker={"size": 15, "symbol": "diamond"},
+                            name="指定配分",
+                        )
+                    )
+
                 if maximum_sharpe is not None:
                     sharpe_weights, sharpe_return, sharpe_risk, sharpe_ratio = maximum_sharpe
                     frontier_fig.add_trace(
@@ -609,6 +686,19 @@ if run:
                     hovermode="closest",
                 )
                 st.plotly_chart(frontier_fig, use_container_width=True)
+
+                if custom_annual_return is not None and custom_annual_risk is not None:
+                    st.subheader("指定ポートフォリオ")
+                    custom_col1, custom_col2 = st.columns(2)
+                    custom_col1.metric("推定年平均リターン", f"{custom_annual_return:.2%}")
+                    custom_col2.metric("推定年率リスク", f"{custom_annual_risk:.2%}")
+                    st.dataframe(
+                        allocation_table(custom_weights).style.format(
+                            {"配分比率": "{:.2f}%"}
+                        ),
+                        use_container_width=True,
+                        hide_index=True,
+                    )
 
                 if maximum_sharpe is not None:
                     sharpe_weights, sharpe_return, sharpe_risk, sharpe_ratio = maximum_sharpe
@@ -682,20 +772,24 @@ if run:
                     portfolio_options.append("ACWIのみ")
                 if maximum_sharpe is not None:
                     portfolio_options.append("シャープレシオ最大")
+                if custom_return_series is not None and len(custom_return_series) >= 12:
+                    portfolio_options.append("指定配分")
                 simulation_portfolio = st.radio(
                     "シミュレーション対象",
                     portfolio_options,
                     horizontal=False,
                 )
 
-        if simulation_portfolio == "S&P 500のみ":
-            simulation_returns = returns[["S&P 500 ETF (SPY)"]].dropna()
-        elif simulation_portfolio == "ACWIのみ":
-            simulation_returns = returns[["全世界株式 ETF (ACWI)"]].dropna()
+        if simulation_portfolio == "指定配分":
+            portfolio_return_series = custom_return_series.dropna()
         else:
-            simulation_returns = returns.dropna(how="any")
+            if simulation_portfolio == "S&P 500のみ":
+                simulation_returns = returns[["S&P 500 ETF (SPY)"]].dropna()
+            elif simulation_portfolio == "ACWIのみ":
+                simulation_returns = returns[["全世界株式 ETF (ACWI)"]].dropna()
+            else:
+                simulation_returns = returns.dropna(how="any")
 
-        if len(simulation_returns) >= 12:
             if simulation_portfolio == "シャープレシオ最大" and maximum_sharpe is not None:
                 simulation_weights = maximum_sharpe[0].reindex(
                     simulation_returns.columns
@@ -706,6 +800,8 @@ if run:
                 )
 
             portfolio_return_series = simulation_returns @ simulation_weights
+
+        if len(portfolio_return_series) >= 12:
             simulation_annual_return = float(
                 portfolio_return_series.mean() * periods_per_year
             )
