@@ -1,6 +1,7 @@
 from datetime import date, timedelta
 from itertools import combinations
 
+import numpy as np
 import pandas as pd
 import plotly.express as px
 import streamlit as st
@@ -41,7 +42,9 @@ def fetch_one(ticker: str, start: date, end: date, interval: str) -> pd.DataFram
     return data
 
 
-def annualized_statistics(close: pd.Series, periods_per_year: int) -> tuple[float | None, float | None]:
+def annualized_statistics(
+    close: pd.Series, periods_per_year: int
+) -> tuple[float | None, float | None]:
     """価格系列から算術平均ベースの年平均リターンと年率リスクを返す。"""
     returns = close.pct_change(fill_method=None).dropna()
     if returns.empty:
@@ -64,6 +67,56 @@ def convert_to_jpy(usd_close: pd.Series, usd_jpy: pd.Series, name: str) -> pd.Se
     aligned = aligned.loc[usd_close.index].dropna(subset=["usd_price", "usd_jpy"])
 
     return (aligned["usd_price"] * aligned["usd_jpy"]).rename(name)
+
+
+def minimum_variance_portfolio(
+    returns: pd.DataFrame, periods_per_year: int
+) -> tuple[pd.Series, float, float] | None:
+    """空売りなし・合計100%の制約で最小分散ポートフォリオを求める。"""
+    clean_returns = returns.dropna(how="any")
+    if len(clean_returns) < 2 or clean_returns.shape[1] < 2:
+        return None
+
+    covariance = clean_returns.cov() * periods_per_year
+    expected_returns = clean_returns.mean() * periods_per_year
+    asset_names = list(covariance.columns)
+
+    best_weights = None
+    best_variance = np.inf
+    tolerance = 1e-10
+
+    # 最適解で比率が0になる資産にも対応するため、全ての資産部分集合を調べる。
+    for subset_size in range(1, len(asset_names) + 1):
+        for subset in combinations(range(len(asset_names)), subset_size):
+            subset_covariance = covariance.iloc[list(subset), list(subset)].to_numpy()
+            ones = np.ones(subset_size)
+            inverse_covariance = np.linalg.pinv(subset_covariance)
+            denominator = float(ones @ inverse_covariance @ ones)
+
+            if denominator <= tolerance:
+                continue
+
+            subset_weights = inverse_covariance @ ones / denominator
+            if np.any(subset_weights < -tolerance):
+                continue
+
+            subset_weights = np.clip(subset_weights, 0.0, None)
+            subset_weights = subset_weights / subset_weights.sum()
+            variance = float(subset_weights @ subset_covariance @ subset_weights)
+
+            if variance < best_variance:
+                full_weights = np.zeros(len(asset_names))
+                full_weights[list(subset)] = subset_weights
+                best_weights = full_weights
+                best_variance = variance
+
+    if best_weights is None:
+        return None
+
+    weights = pd.Series(best_weights, index=asset_names, name="配分比率")
+    portfolio_return = float(weights @ expected_returns)
+    portfolio_risk = float(np.sqrt(max(best_variance, 0.0)))
+    return weights, portfolio_return, portfolio_risk
 
 
 st.title("市場データ取得テスト")
@@ -305,8 +358,53 @@ if run:
                 st.info(
                     f"{rolling_years}年移動相関を計算するには、より長い取得期間が必要です。"
                 )
+
+            minimum_variance = minimum_variance_portfolio(returns, periods_per_year)
+            st.subheader("最小分散ポートフォリオ")
+            st.caption(
+                "設定期間のリターンから推定した共分散行列を使い、空売りなし・配分合計100%の条件で年率リスクが最小になる配分を計算します。"
+            )
+
+            if minimum_variance is not None:
+                weights, portfolio_return, portfolio_risk = minimum_variance
+                allocation = (
+                    weights.rename("配分比率")
+                    .mul(100)
+                    .reset_index()
+                    .rename(columns={"index": "アセット"})
+                )
+                allocation["配分比率"] = allocation["配分比率"].round(2)
+
+                metric_col1, metric_col2 = st.columns(2)
+                metric_col1.metric("推定年平均リターン", f"{portfolio_return:.2%}")
+                metric_col2.metric("推定年率リスク", f"{portfolio_risk:.2%}")
+
+                table_col, chart_col = st.columns([1, 1])
+                with table_col:
+                    st.dataframe(
+                        allocation.style.format({"配分比率": "{:.2f}%"}),
+                        use_container_width=True,
+                        hide_index=True,
+                    )
+                with chart_col:
+                    positive_allocation = allocation[allocation["配分比率"] > 0]
+                    allocation_fig = px.pie(
+                        positive_allocation,
+                        names="アセット",
+                        values="配分比率",
+                        title="最小分散ポートフォリオの配分",
+                        hole=0.35,
+                    )
+                    allocation_fig.update_traces(textposition="inside", textinfo="percent+label")
+                    st.plotly_chart(allocation_fig, use_container_width=True)
+
+                st.caption(
+                    "推定値は選択した期間・頻度・表示通貨に依存します。将来のリターンやリスクを保証するものではありません。"
+                )
+            else:
+                st.info("最小分散ポートフォリオの計算に必要な共通データが不足しています。")
         else:
-            st.info("相関係数を表示するには、2つ以上のアセットを選択してください。")
+            st.info("相関係数と最小分散ポートフォリオを表示するには、2つ以上のアセットを選択してください。")
 
         csv = prices.to_csv().encode("utf-8-sig")
         currency_code = "jpy" if currency == "円建て" else "usd"
