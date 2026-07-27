@@ -42,12 +42,12 @@ def fetch_one(ticker: str, start: date, end: date, interval: str) -> pd.DataFram
 
 def annualized_statistics(close: pd.Series, periods_per_year: int) -> tuple[float | None, float | None]:
     """価格系列から算術平均ベースの年平均リターンと年率リスクを返す。"""
-    daily_or_monthly_returns = close.pct_change(fill_method=None).dropna()
-    if daily_or_monthly_returns.empty:
+    returns = close.pct_change(fill_method=None).dropna()
+    if returns.empty:
         return None, None
 
-    annual_return = float(daily_or_monthly_returns.mean() * periods_per_year)
-    annual_risk = float(daily_or_monthly_returns.std() * (periods_per_year**0.5))
+    annual_return = float(returns.mean() * periods_per_year)
+    annual_risk = float(returns.std() * (periods_per_year**0.5))
     return annual_return, annual_risk
 
 
@@ -66,13 +66,20 @@ def convert_to_jpy(usd_close: pd.Series, usd_jpy: pd.Series, name: str) -> pd.Se
 
 
 st.title("市場データ取得テスト")
-st.caption("Yahoo Finance から取得した各資産を円換算して比較します。")
+st.caption("Yahoo Finance から取得した各資産を、円建てまたはドル建てで比較します。")
 
 st.sidebar.header("取得条件")
 selected_names = st.sidebar.multiselect(
     "取得対象",
     list(ASSETS.keys()),
     default=list(ASSETS.keys()),
+)
+
+currency = st.sidebar.radio(
+    "表示通貨",
+    ["円建て", "ドル建て"],
+    index=0,
+    horizontal=True,
 )
 
 frequency = st.sidebar.radio("頻度", ["日足", "月足"], horizontal=True)
@@ -107,18 +114,26 @@ if run:
     successful = {}
     result_errors = {}
     original_missing_counts = {}
+    usd_jpy = None
 
-    with st.spinner("データを取得して円換算しています…"):
-        try:
-            fx_df = fetch_one(FX_TICKER, start_date, end_date, interval)
-            if fx_df.empty or "Close" not in fx_df.columns:
-                raise ValueError("USD/JPYの為替データを取得できませんでした。")
-            usd_jpy = fx_df["Close"].dropna()
-            if usd_jpy.empty:
-                raise ValueError("USD/JPYの終値データがありません。")
-        except Exception as exc:
-            st.error(f"円換算に必要な為替データの取得に失敗しました: {exc}")
-            st.stop()
+    spinner_text = (
+        "データを取得して円換算しています…"
+        if currency == "円建て"
+        else "ドル建てデータを取得しています…"
+    )
+
+    with st.spinner(spinner_text):
+        if currency == "円建て":
+            try:
+                fx_df = fetch_one(FX_TICKER, start_date, end_date, interval)
+                if fx_df.empty or "Close" not in fx_df.columns:
+                    raise ValueError("USD/JPYの為替データを取得できませんでした。")
+                usd_jpy = fx_df["Close"].dropna()
+                if usd_jpy.empty:
+                    raise ValueError("USD/JPYの終値データがありません。")
+            except Exception as exc:
+                st.error(f"円換算に必要な為替データの取得に失敗しました: {exc}")
+                st.stop()
 
         for name in selected_names:
             ticker = ASSETS[name]
@@ -132,14 +147,20 @@ if run:
                 if usd_close.empty:
                     raise ValueError("終値データがありません。")
 
-                jpy_close = convert_to_jpy(usd_close, usd_jpy, name)
-                if jpy_close.empty:
-                    raise ValueError("円換算後の価格データがありません。")
+                if currency == "円建て":
+                    price_series = convert_to_jpy(usd_close, usd_jpy, name)
+                    if price_series.empty:
+                        raise ValueError("円換算後の価格データがありません。")
+                else:
+                    price_series = usd_close.rename(name)
 
-                successful[name] = jpy_close
+                successful[name] = price_series
                 original_missing_counts[name] = int(df["Close"].isna().sum())
             except Exception as exc:
                 result_errors[name] = ("失敗", str(exc))
+
+    currency_unit = "円" if currency == "円建て" else "ドル"
+    latest_value_column = f"最新値（{currency_unit}）"
 
     results = []
     for name in selected_names:
@@ -154,7 +175,7 @@ if run:
                     "件数": 0,
                     "開始": None,
                     "終了": None,
-                    "最新値（円）": None,
+                    latest_value_column: None,
                     "欠損数": None,
                     "年平均リターン": None,
                     "年率リスク": None,
@@ -173,7 +194,7 @@ if run:
                 "件数": len(close),
                 "開始": close.index.min(),
                 "終了": close.index.max(),
-                "最新値（円）": round(float(close.iloc[-1]), 2),
+                latest_value_column: round(float(close.iloc[-1]), 2),
                 "欠損数": original_missing_counts.get(name, 0),
                 "年平均リターン": (
                     f"{annual_return:.2%}" if annual_return is not None else None
@@ -183,14 +204,14 @@ if run:
             }
         )
 
-    st.subheader("取得結果一覧（円換算）")
+    st.subheader(f"取得結果一覧（{currency}）")
     st.dataframe(pd.DataFrame(results), use_container_width=True, hide_index=True)
 
     if successful:
-        prices_jpy = pd.concat(successful.values(), axis=1).sort_index()
+        prices = pd.concat(successful.values(), axis=1).sort_index()
 
         # 各アセットについて、設定期間内の最初の有効値を100として指数化する。
-        indexed_prices = prices_jpy.apply(
+        indexed_prices = prices.apply(
             lambda series: series / series.dropna().iloc[0] * 100
             if not series.dropna().empty
             else series
@@ -207,18 +228,19 @@ if run:
             x="Date",
             y="指数",
             color="対象",
-            title=f"各アセットの円換算後の推移（設定期間の初日＝100・{frequency}）",
+            title=f"各アセットの{currency}推移（設定期間の初日＝100・{frequency}）",
             labels={"Date": "日付", "指数": "初日を100とした指数", "対象": "アセット"},
         )
         fig.add_hline(y=100, line_dash="dash")
         fig.update_layout(hovermode="x unified")
         st.plotly_chart(fig, use_container_width=True)
 
-        csv = prices_jpy.to_csv().encode("utf-8-sig")
+        csv = prices.to_csv().encode("utf-8-sig")
+        currency_code = "jpy" if currency == "円建て" else "usd"
         st.download_button(
-            "円換算データをCSVでダウンロード",
+            f"{currency}データをCSVでダウンロード",
             data=csv,
-            file_name="market_prices_jpy.csv",
+            file_name=f"market_prices_{currency_code}.csv",
             mime="text/csv",
         )
 else:
