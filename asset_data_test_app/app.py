@@ -270,6 +270,35 @@ def monte_carlo_summary(paths: pd.DataFrame) -> pd.DataFrame:
     return percentiles
 
 
+def portfolio_return_series_for_option(
+    option: str,
+    returns: pd.DataFrame,
+    maximum_sharpe: tuple[pd.Series, float, float, float] | None,
+    custom_return_series: pd.Series | None,
+) -> pd.Series | None:
+    if option == "指定配分":
+        return None if custom_return_series is None else custom_return_series.dropna()
+
+    if option == "S&P 500のみ":
+        option_returns = returns[["S&P 500 ETF (SPY)"]].dropna()
+    elif option == "ACWIのみ":
+        option_returns = returns[["全世界株式 ETF (ACWI)"]].dropna()
+    else:
+        option_returns = returns.dropna(how="any")
+
+    if option_returns.empty:
+        return None
+
+    if option == "シャープレシオ最大" and maximum_sharpe is not None:
+        option_weights = maximum_sharpe[0].reindex(option_returns.columns).fillna(0)
+    else:
+        option_weights = pd.Series(
+            1 / option_returns.shape[1], index=option_returns.columns
+        )
+
+    return option_returns @ option_weights
+
+
 st.title("市場データ取得テスト")
 st.caption("Yahoo Finance から取得した各資産を、円建てまたはドル建てで比較します。")
 
@@ -507,8 +536,6 @@ if run:
 
         returns = prices.pct_change(fill_method=None)
         maximum_sharpe = None
-        covariance = None
-        expected_returns = None
         custom_return_series = None
         custom_annual_return = None
         custom_annual_risk = None
@@ -784,6 +811,12 @@ if run:
                 )
             with mc_col2:
                 simulation_years = st.slider("予測期間（年）", 1, 50, 30)
+                distribution_year = st.slider(
+                    "確率分布を表示する時点（年後）",
+                    1,
+                    simulation_years,
+                    min(10, simulation_years),
+                )
                 simulation_count = st.select_slider(
                     "試行回数", options=[500, 1000, 3000, 5000, 10000], value=5000
                 )
@@ -798,33 +831,24 @@ if run:
                 if custom_return_series is not None and len(custom_return_series) >= 12:
                     portfolio_options.append("指定配分")
                 simulation_portfolio = st.radio(
-                    "シミュレーション対象",
+                    "資産推移を表示する対象",
                     portfolio_options,
                     horizontal=False,
                 )
-
-        if simulation_portfolio == "指定配分":
-            portfolio_return_series = custom_return_series.dropna()
-        else:
-            if simulation_portfolio == "S&P 500のみ":
-                simulation_returns = returns[["S&P 500 ETF (SPY)"]].dropna()
-            elif simulation_portfolio == "ACWIのみ":
-                simulation_returns = returns[["全世界株式 ETF (ACWI)"]].dropna()
-            else:
-                simulation_returns = returns.dropna(how="any")
-
-            if simulation_portfolio == "シャープレシオ最大" and maximum_sharpe is not None:
-                simulation_weights = maximum_sharpe[0].reindex(
-                    simulation_returns.columns
-                ).fillna(0)
-            else:
-                simulation_weights = pd.Series(
-                    1 / simulation_returns.shape[1], index=simulation_returns.columns
+                distribution_portfolios = st.multiselect(
+                    "確率分布で比較する対象",
+                    portfolio_options,
+                    default=portfolio_options,
                 )
 
-            portfolio_return_series = simulation_returns @ simulation_weights
+        portfolio_return_series = portfolio_return_series_for_option(
+            simulation_portfolio,
+            returns,
+            maximum_sharpe,
+            custom_return_series,
+        )
 
-        if len(portfolio_return_series) >= 12:
+        if portfolio_return_series is not None and len(portfolio_return_series) >= 12:
             simulation_annual_return = float(
                 portfolio_return_series.mean() * periods_per_year
             )
@@ -855,68 +879,13 @@ if run:
             metric4.metric("元本割れ確率", f"{loss_probability:.1%}")
 
             mc_fig = go.Figure()
-            mc_fig.add_trace(
-                go.Scatter(
-                    x=mc_summary.index,
-                    y=mc_summary["90%"],
-                    mode="lines",
-                    line={"width": 0},
-                    showlegend=False,
-                    hoverinfo="skip",
-                )
-            )
-            mc_fig.add_trace(
-                go.Scatter(
-                    x=mc_summary.index,
-                    y=mc_summary["10%"],
-                    mode="lines",
-                    fill="tonexty",
-                    name="10〜90%範囲",
-                    line={"width": 0},
-                    hovertemplate="10%点: %{y:,.0f}<extra></extra>",
-                )
-            )
-            mc_fig.add_trace(
-                go.Scatter(
-                    x=mc_summary.index,
-                    y=mc_summary["75%"],
-                    mode="lines",
-                    line={"width": 0},
-                    showlegend=False,
-                    hoverinfo="skip",
-                )
-            )
-            mc_fig.add_trace(
-                go.Scatter(
-                    x=mc_summary.index,
-                    y=mc_summary["25%"],
-                    mode="lines",
-                    fill="tonexty",
-                    name="25〜75%範囲",
-                    line={"width": 0},
-                    hovertemplate="25%点: %{y:,.0f}<extra></extra>",
-                )
-            )
-            mc_fig.add_trace(
-                go.Scatter(
-                    x=mc_summary.index,
-                    y=mc_summary["中央値"],
-                    mode="lines",
-                    name="中央値",
-                    hovertemplate="%{x:.1f}年後<br>%{y:,.0f}<extra></extra>",
-                )
-            )
+            mc_fig.add_trace(go.Scatter(x=mc_summary.index, y=mc_summary["90%"], mode="lines", line={"width": 0}, showlegend=False, hoverinfo="skip"))
+            mc_fig.add_trace(go.Scatter(x=mc_summary.index, y=mc_summary["10%"], mode="lines", fill="tonexty", name="10〜90%範囲", line={"width": 0}, hovertemplate="10%点: %{y:,.0f}<extra></extra>"))
+            mc_fig.add_trace(go.Scatter(x=mc_summary.index, y=mc_summary["75%"], mode="lines", line={"width": 0}, showlegend=False, hoverinfo="skip"))
+            mc_fig.add_trace(go.Scatter(x=mc_summary.index, y=mc_summary["25%"], mode="lines", fill="tonexty", name="25〜75%範囲", line={"width": 0}, hovertemplate="25%点: %{y:,.0f}<extra></extra>"))
+            mc_fig.add_trace(go.Scatter(x=mc_summary.index, y=mc_summary["中央値"], mode="lines", name="中央値", hovertemplate="%{x:.1f}年後<br>%{y:,.0f}<extra></extra>"))
             contribution_line = initial_amount + monthly_contribution * 12 * mc_summary.index
-            mc_fig.add_trace(
-                go.Scatter(
-                    x=mc_summary.index,
-                    y=contribution_line,
-                    mode="lines",
-                    line={"dash": "dash"},
-                    name="累計元本",
-                    hovertemplate="累計元本: %{y:,.0f}<extra></extra>",
-                )
-            )
+            mc_fig.add_trace(go.Scatter(x=mc_summary.index, y=contribution_line, mode="lines", line={"dash": "dash"}, name="累計元本", hovertemplate="累計元本: %{y:,.0f}<extra></extra>"))
             mc_fig.update_layout(
                 xaxis_title="経過年数",
                 yaxis_title=f"資産額（{currency_unit}）",
@@ -943,6 +912,99 @@ if run:
                 use_container_width=True,
                 hide_index=True,
             )
+
+            st.subheader(f"{distribution_year}年後の資産額の確率分布")
+            st.caption(
+                "横軸は資産額、縦軸は確率密度です。選択したシミュレーション対象を同じグラフ上に重ねています。"
+            )
+
+            distribution_results = {}
+            for option in distribution_portfolios:
+                option_series = portfolio_return_series_for_option(
+                    option,
+                    returns,
+                    maximum_sharpe,
+                    custom_return_series,
+                )
+                if option_series is None or len(option_series) < 12:
+                    continue
+
+                option_annual_return = float(option_series.mean() * periods_per_year)
+                option_annual_risk = float(
+                    option_series.std() * np.sqrt(periods_per_year)
+                )
+                option_paths = monte_carlo_simulation(
+                    initial_amount=initial_amount,
+                    monthly_contribution=monthly_contribution,
+                    years=distribution_year,
+                    simulations=simulation_count,
+                    annual_return=option_annual_return,
+                    annual_risk=option_annual_risk,
+                    seed=42,
+                )
+                distribution_results[option] = option_paths.iloc[-1].to_numpy()
+
+            if distribution_results:
+                combined_values = np.concatenate(list(distribution_results.values()))
+                lower_bound = float(np.quantile(combined_values, 0.005))
+                upper_bound = float(np.quantile(combined_values, 0.995))
+                if upper_bound <= lower_bound:
+                    upper_bound = lower_bound + 1.0
+                bin_edges = np.linspace(lower_bound, upper_bound, 101)
+                bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
+
+                distribution_fig = go.Figure()
+                distribution_rows = []
+                for option, values in distribution_results.items():
+                    values_in_range = values[
+                        (values >= lower_bound) & (values <= upper_bound)
+                    ]
+                    density, _ = np.histogram(
+                        values_in_range,
+                        bins=bin_edges,
+                        density=True,
+                    )
+                    distribution_fig.add_trace(
+                        go.Scatter(
+                            x=bin_centers,
+                            y=density,
+                            mode="lines",
+                            name=option,
+                            hovertemplate=(
+                                f"{option}<br>資産額: %{{x:,.0f}} {currency_unit}"
+                                "<br>確率密度: %{y:.3e}<extra></extra>"
+                            ),
+                        )
+                    )
+                    distribution_rows.append(
+                        {
+                            "対象": option,
+                            "下位10%": float(np.quantile(values, 0.10)),
+                            "中央値": float(np.quantile(values, 0.50)),
+                            "上位10%": float(np.quantile(values, 0.90)),
+                        }
+                    )
+
+                distribution_fig.update_layout(
+                    xaxis_title=f"{distribution_year}年後の資産額（{currency_unit}）",
+                    yaxis_title="確率密度",
+                    hovermode="x unified",
+                )
+                st.plotly_chart(distribution_fig, use_container_width=True)
+                st.dataframe(
+                    pd.DataFrame(distribution_rows).style.format(
+                        {
+                            "下位10%": "{:,.0f}",
+                            "中央値": "{:,.0f}",
+                            "上位10%": "{:,.0f}",
+                        }
+                    ),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+            else:
+                st.info("確率分布を表示する対象を1つ以上選択してください。")
+
             st.caption(
                 "この結果は過去データに基づく確率的な試算です。税金・手数料・インフレ・相場構造の変化は考慮していません。"
             )
