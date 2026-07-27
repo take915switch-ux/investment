@@ -17,7 +17,46 @@ ASSETS = {
     "米国総合債券 ETF (AGG)": "AGG",
     "全世界株式 ETF (ACWI)": "ACWI",
 }
+ASSET_SHORT_NAMES = {
+    "S&P 500 ETF (SPY)": "SPY",
+    "金 ETF (GLD)": "GLD",
+    "米国総合債券 ETF (AGG)": "AGG",
+    "全世界株式 ETF (ACWI)": "ACWI",
+}
 FX_TICKER = "JPY=X"
+
+
+_original_plotly_chart = st.plotly_chart
+
+
+def plotly_chart_with_bottom_legend(figure, *args, **kwargs):
+    """すべてのPlotlyグラフで凡例を下部に配置する。"""
+    if hasattr(figure, "update_layout") and len(getattr(figure, "data", [])) > 0:
+        visible_legend_count = sum(
+            1
+            for trace in figure.data
+            if getattr(trace, "showlegend", True) is not False
+        )
+        if visible_legend_count > 0:
+            current_height = figure.layout.height or 500
+            bottom_margin = 150 if visible_legend_count >= 4 else 110
+            figure.update_layout(
+                height=max(current_height, 560),
+                margin={"l": 50, "r": 20, "t": 70, "b": bottom_margin},
+                legend={
+                    "orientation": "h",
+                    "yanchor": "top",
+                    "y": -0.18,
+                    "xanchor": "center",
+                    "x": 0.5,
+                    "font": {"size": 11},
+                    "title_text": "",
+                },
+            )
+    return _original_plotly_chart(figure, *args, **kwargs)
+
+
+st.plotly_chart = plotly_chart_with_bottom_legend
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -621,15 +660,20 @@ if run:
 
         if len(successful) >= 2:
             correlation = returns.corr().round(2)
+            correlation_display = correlation.rename(
+                index=ASSET_SHORT_NAMES,
+                columns=ASSET_SHORT_NAMES,
+            )
             st.subheader(f"アセット間の相関係数（{currency}・{frequency}リターン）")
             st.caption(
                 "各セルは、設定期間内の各アセットの騰落率について計算したPearsonの相関係数です。"
             )
             st.dataframe(
-                correlation.style.format("{:.2f}").background_gradient(
+                correlation_display.style.format("{:.2f}").background_gradient(
                     cmap="RdBu_r", vmin=-1, vmax=1
                 ),
                 use_container_width=True,
+                height=178,
             )
 
             rolling_corr = rolling_correlations(returns, rolling_years, frequency)
@@ -680,17 +724,7 @@ if run:
                     rolling_fig.update_layout(
                         hovermode="x unified",
                         height=620,
-                        margin={"l": 50, "r": 15, "t": 70, "b": 170},
                         title={"font": {"size": 16}},
-                        legend={
-                            "orientation": "h",
-                            "yanchor": "top",
-                            "y": -0.20,
-                            "xanchor": "center",
-                            "x": 0.5,
-                            "font": {"size": 11},
-                            "title_text": "",
-                        },
                     )
                     st.caption(
                         f"各時点からさかのぼった直近{rolling_years}年間のリターンで計算しています。"
