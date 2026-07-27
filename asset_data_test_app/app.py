@@ -448,26 +448,38 @@ if run:
         prices.index = pd.to_datetime(prices.index)
         prices.index.name = "Date"
 
-        st.subheader(f"価格データ（{currency}）")
-        st.dataframe(prices.tail(30), use_container_width=True)
-
         stats_rows = []
         for name in prices.columns:
             annual_return, annual_risk = annualized_statistics(
                 prices[name].dropna(), periods_per_year
+            )
+            sharpe_ratio = (
+                (annual_return - risk_free_rate) / annual_risk
+                if annual_return is not None
+                and annual_risk is not None
+                and annual_risk > 0
+                else None
             )
             stats_rows.append(
                 {
                     "アセット": name,
                     "年平均リターン": annual_return,
                     "年率リスク": annual_risk,
+                    "シャープレシオ": sharpe_ratio,
                 }
             )
 
-        st.subheader("リターンとリスク")
+        st.subheader("リターン・リスク・シャープレシオ")
+        st.caption(
+            f"シャープレシオは、無リスク金利を年率{risk_free_rate_percent:.1f}%として計算しています。"
+        )
         st.dataframe(
             pd.DataFrame(stats_rows).style.format(
-                {"年平均リターン": "{:.2%}", "年率リスク": "{:.2%}"}
+                {
+                    "年平均リターン": "{:.2%}",
+                    "年率リスク": "{:.2%}",
+                    "シャープレシオ": "{:.3f}",
+                }
             ),
             use_container_width=True,
             hide_index=True,
@@ -500,6 +512,7 @@ if run:
         custom_return_series = None
         custom_annual_return = None
         custom_annual_risk = None
+        custom_sharpe_ratio = None
 
         positive_risky_weights = custom_weights.drop("現金")
         positive_risky_weights = positive_risky_weights[positive_risky_weights > 0]
@@ -531,6 +544,10 @@ if run:
                 custom_annual_risk = float(
                     custom_return_series.std() * np.sqrt(periods_per_year)
                 )
+                if custom_annual_risk > 0:
+                    custom_sharpe_ratio = (
+                        custom_annual_return - risk_free_rate
+                    ) / custom_annual_risk
 
         if missing_custom_assets:
             st.warning(
@@ -689,9 +706,15 @@ if run:
 
                 if custom_annual_return is not None and custom_annual_risk is not None:
                     st.subheader("指定ポートフォリオ")
-                    custom_col1, custom_col2 = st.columns(2)
+                    custom_col1, custom_col2, custom_col3 = st.columns(3)
                     custom_col1.metric("推定年平均リターン", f"{custom_annual_return:.2%}")
                     custom_col2.metric("推定年率リスク", f"{custom_annual_risk:.2%}")
+                    custom_col3.metric(
+                        "シャープレシオ",
+                        f"{custom_sharpe_ratio:.3f}"
+                        if custom_sharpe_ratio is not None
+                        else "計算不可",
+                    )
                     st.dataframe(
                         allocation_table(custom_weights).style.format(
                             {"配分比率": "{:.2f}%"}
