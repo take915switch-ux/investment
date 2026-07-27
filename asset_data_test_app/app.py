@@ -653,6 +653,13 @@ if run:
                         )
                         .dropna(subset=["相関係数"])
                     )
+                    rolling_chart_data["組み合わせ"] = (
+                        rolling_chart_data["組み合わせ"]
+                        .str.replace("S&P 500 ETF (SPY)", "SPY", regex=False)
+                        .str.replace("金 ETF (GLD)", "GLD", regex=False)
+                        .str.replace("米国総合債券 ETF (AGG)", "AGG", regex=False)
+                        .str.replace("全世界株式 ETF (ACWI)", "ACWI", regex=False)
+                    )
                     rolling_fig = px.line(
                         rolling_chart_data,
                         x="Date",
@@ -672,13 +679,21 @@ if run:
                     rolling_fig.update_yaxes(range=[-1, 1], dtick=0.2)
                     rolling_fig.update_layout(
                         hovermode="x unified",
-                        height=520,
-                        showlegend=False,
-                        margin={"l": 50, "r": 15, "t": 70, "b": 55},
+                        height=620,
+                        margin={"l": 50, "r": 15, "t": 70, "b": 170},
                         title={"font": {"size": 16}},
+                        legend={
+                            "orientation": "h",
+                            "yanchor": "top",
+                            "y": -0.20,
+                            "xanchor": "center",
+                            "x": 0.5,
+                            "font": {"size": 11},
+                            "title_text": "",
+                        },
                     )
                     st.caption(
-                        f"各時点からさかのぼった直近{rolling_years}年間のリターンで計算しています。線の名称はグラフをタップすると確認できます。"
+                        f"各時点からさかのぼった直近{rolling_years}年間のリターンで計算しています。"
                     )
                     st.plotly_chart(rolling_fig, use_container_width=True)
             else:
