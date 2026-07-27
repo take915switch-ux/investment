@@ -534,6 +534,43 @@ if run:
         fig.update_layout(hovermode="x unified")
         st.plotly_chart(fig, use_container_width=True)
 
+        yearly_prices = prices.resample("YE").last()
+        yearly_returns = yearly_prices.pct_change(fill_method=None) * 100
+        yearly_returns.index = yearly_returns.index.year.astype(str)
+        yearly_returns.index.name = "年"
+        yearly_return_data = (
+            yearly_returns.reset_index()
+            .melt(id_vars="年", var_name="アセット", value_name="リターン")
+            .dropna(subset=["リターン"])
+        )
+
+        st.subheader("各アセットの年別リターン")
+        st.caption(
+            "各年末の価格を前年末と比較した暦年リターンです。最新年は前年末から最新取得日までのリターンを表示します。"
+        )
+        if not yearly_return_data.empty:
+            yearly_return_fig = px.bar(
+                yearly_return_data,
+                x="年",
+                y="リターン",
+                color="アセット",
+                barmode="group",
+                labels={
+                    "年": "年",
+                    "リターン": "年間リターン（%）",
+                    "アセット": "アセット",
+                },
+                title=f"各アセットの年別リターン（{currency}）",
+            )
+            yearly_return_fig.add_hline(y=0, line_dash="dash")
+            yearly_return_fig.update_layout(hovermode="x unified")
+            yearly_return_fig.update_traces(
+                hovertemplate="%{x}年<br>%{y:.2f}%<extra>%{fullData.name}</extra>"
+            )
+            st.plotly_chart(yearly_return_fig, use_container_width=True)
+        else:
+            st.info("年別リターンを計算できるだけのデータがありません。")
+
         returns = prices.pct_change(fill_method=None)
         maximum_sharpe = None
         custom_return_series = None
