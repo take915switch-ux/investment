@@ -1024,6 +1024,17 @@ if run:
                         }
                     )
 
+                principal_at_distribution = (
+                    initial_amount + monthly_contribution * distribution_year * 12
+                )
+                distribution_fig.add_vline(
+                    x=principal_at_distribution,
+                    line_dash="dash",
+                    annotation_text=(
+                        f"元本: {principal_at_distribution:,.0f} {currency_unit}"
+                    ),
+                    annotation_position="top right",
+                )
                 distribution_fig.update_layout(
                     xaxis_title=f"{distribution_year}年後の資産額（{currency_unit}）",
                     yaxis_title="確率密度",
