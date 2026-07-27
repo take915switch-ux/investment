@@ -29,7 +29,8 @@ jobs:
                   raise SystemExit(f"{label} block not found")
               source = source.replace(old, new, 1)
 
-          helper_anchor = '''def allocation_table(weights: pd.Series) -> pd.DataFrame:
+          if "def custom_portfolio_return_series(" not in source:
+              old = '''def allocation_table(weights: pd.Series) -> pd.DataFrame:
               allocation = (
                   weights.rename("配分比率")
                   .mul(100)
@@ -39,48 +40,49 @@ jobs:
               allocation["配分比率"] = allocation["配分比率"].round(2)
               return allocation
           '''
-          helper_replacement = helper_anchor + '''
+              old = old.replace("          ", "")
+              new = old + '''
 
-          def custom_portfolio_returns(
+          def custom_portfolio_return_series(
               returns: pd.DataFrame,
               weights: pd.Series,
               cash_annual_return: float,
               periods_per_year: int,
           ) -> tuple[pd.Series | None, list[str]]:
               risky_weights = weights.drop(labels=["現金"], errors="ignore")
-              active_risky = risky_weights[risky_weights > 0].index.tolist()
-              missing_assets = [name for name in active_risky if name not in returns.columns]
+              active_assets = risky_weights[risky_weights > 0].index.tolist()
+              missing_assets = [name for name in active_assets if name not in returns.columns]
               if missing_assets:
                   return None, missing_assets
 
-              if active_risky:
-                  aligned_returns = returns[active_risky].dropna(how="any")
-                  if aligned_returns.empty:
+              if active_assets:
+                  aligned = returns[active_assets].dropna(how="any")
+                  if aligned.empty:
                       return None, []
-                  portfolio = aligned_returns.mul(risky_weights[active_risky], axis=1).sum(axis=1)
+                  result = aligned.mul(risky_weights[active_assets], axis=1).sum(axis=1)
               else:
-                  aligned_returns = returns.dropna(how="all")
-                  if aligned_returns.empty:
+                  aligned = returns.dropna(how="all")
+                  if aligned.empty:
                       return None, []
-                  portfolio = pd.Series(0.0, index=aligned_returns.index)
+                  result = pd.Series(0.0, index=aligned.index)
 
               cash_weight = float(weights.get("現金", 0.0))
               cash_period_return = (1 + cash_annual_return) ** (1 / periods_per_year) - 1
-              portfolio = portfolio + cash_weight * cash_period_return
-              portfolio.name = "指定配分"
-              return portfolio, []
-          '''
-          if "def custom_portfolio_returns(" not in source:
-              replace_once(helper_anchor, helper_replacement, "helper")
+              result = result + cash_weight * cash_period_return
+              result.name = "指定配分"
+              return result, []
+          '''.replace("          ", "")
+              replace_once(old, new, "helper")
 
-          sidebar_anchor = '''risk_free_rate = risk_free_rate_percent / 100
+          if 'st.sidebar.subheader("指定ポートフォリオ")' not in source:
+              old = '''risk_free_rate = risk_free_rate_percent / 100
 
           default_start = date(2008, 3, 28)
-          '''
-          sidebar_replacement = '''risk_free_rate = risk_free_rate_percent / 100
+          '''.replace("          ", "")
+              new = '''risk_free_rate = risk_free_rate_percent / 100
 
           st.sidebar.subheader("指定ポートフォリオ")
-          st.sidebar.caption("5項目の合計を100%にしてください。現金の利回りには無リスク金利を使います。")
+          st.sidebar.caption("5項目の合計を100%にしてください。現金は無リスク金利で運用する前提です。")
           custom_spy = st.sidebar.number_input("S&P 500（%）", 0.0, 100.0, 20.0, 1.0)
           custom_gold = st.sidebar.number_input("金（%）", 0.0, 100.0, 20.0, 1.0)
           custom_bond = st.sidebar.number_input("米国総合債券（%）", 0.0, 100.0, 20.0, 1.0)
@@ -104,16 +106,16 @@ jobs:
           )
 
           default_start = date(2008, 3, 28)
-          '''
-          if 'st.sidebar.subheader("指定ポートフォリオ")' not in source:
-              replace_once(sidebar_anchor, sidebar_replacement, "sidebar")
+          '''.replace("          ", "")
+              replace_once(old, new, "sidebar")
 
-          returns_anchor = '''        returns = prices.pct_change(fill_method=None)
+          if "custom_return_series = None" not in source:
+              old = '''        returns = prices.pct_change(fill_method=None)
                   maximum_sharpe = None
                   covariance = None
                   expected_returns = None
-          '''
-          returns_replacement = '''        returns = prices.pct_change(fill_method=None)
+          '''.replace("          ", "")
+              new = '''        returns = prices.pct_change(fill_method=None)
                   maximum_sharpe = None
                   covariance = None
                   expected_returns = None
@@ -123,7 +125,7 @@ jobs:
                   custom_annual_risk = None
 
                   if custom_allocation_valid:
-                      custom_return_series, custom_missing_assets = custom_portfolio_returns(
+                      custom_return_series, custom_missing_assets = custom_portfolio_return_series(
                           returns, custom_weights, risk_free_rate, periods_per_year
                       )
                       if custom_return_series is not None and len(custom_return_series) >= 2:
@@ -139,35 +141,13 @@ jobs:
                           "指定配分に含まれる次の資産を取得対象に追加してください: "
                           + "、".join(custom_missing_assets)
                       )
-          '''
-          if "custom_return_series = None" not in source:
-              replace_once(returns_anchor, returns_replacement, "returns setup")
+          '''.replace("          ", "")
+              replace_once(old, new, "custom calculations")
 
-          graph_anchor = '''                frontier_fig.add_trace(
-                              go.Scatter(
-                                  x=asset_risks,
-                                  y=asset_returns,
-                                  mode="markers+text",
-                                  text=list(expected_returns.index),
-                                  textposition="top center",
-                                  name="各アセット",
-                              )
-                          )
-
-                          if maximum_sharpe is not None:
-          '''
-          graph_replacement = '''                frontier_fig.add_trace(
-                              go.Scatter(
-                                  x=asset_risks,
-                                  y=asset_returns,
-                                  mode="markers+text",
-                                  text=list(expected_returns.index),
-                                  textposition="top center",
-                                  name="各アセット",
-                              )
-                          )
-
-                          if custom_annual_return is not None and custom_annual_risk is not None:
+          if 'text=["指定配分"]' not in source:
+              old = '''                if maximum_sharpe is not None:
+          '''.replace("          ", "")
+              new = '''                if custom_annual_return is not None and custom_annual_risk is not None:
                               frontier_fig.add_trace(
                                   go.Scatter(
                                       x=[custom_annual_risk * 100],
@@ -181,48 +161,29 @@ jobs:
                               )
 
                           if maximum_sharpe is not None:
-          '''
-          if 'text=["指定配分"]' not in source:
-              replace_once(graph_anchor, graph_replacement, "frontier point")
+          '''.replace("          ", "")
+              frontier_start = source.index('st.subheader("効率的フロンティア")')
+              before = source[:frontier_start]
+              after = source[frontier_start:]
+              if old not in after:
+                  raise SystemExit("frontier insertion point not found")
+              source = before + after.replace(old, new, 1)
 
-          chart_anchor = '''                st.plotly_chart(frontier_fig, use_container_width=True)
-
-                          if maximum_sharpe is not None:
-          '''
-          chart_replacement = '''                st.plotly_chart(frontier_fig, use_container_width=True)
-
-                          if custom_annual_return is not None and custom_annual_risk is not None:
-                              st.subheader("指定ポートフォリオ")
-                              custom_col1, custom_col2 = st.columns(2)
-                              custom_col1.metric("推定年平均リターン", f"{custom_annual_return:.2%}")
-                              custom_col2.metric("推定年率リスク", f"{custom_annual_risk:.2%}")
-                              custom_display = custom_weights.rename("配分比率").mul(100).reset_index()
-                              custom_display.columns = ["アセット", "配分比率"]
-                              st.dataframe(
-                                  custom_display.style.format({"配分比率": "{:.1f}%"}),
-                                  use_container_width=True,
-                                  hide_index=True,
-                              )
-
-                          if maximum_sharpe is not None:
-          '''
-          if 'st.subheader("指定ポートフォリオ")' not in source[source.find('st.subheader("効率的フロンティア")'):]:
-              replace_once(chart_anchor, chart_replacement, "custom metrics")
-
-          options_anchor = '''                if maximum_sharpe is not None:
+          if 'portfolio_options.append("指定配分")' not in source:
+              old = '''                if maximum_sharpe is not None:
                                   portfolio_options.append("シャープレシオ最大")
                               simulation_portfolio = st.radio(
-          '''
-          options_replacement = '''                if maximum_sharpe is not None:
+          '''.replace("          ", "")
+              new = '''                if maximum_sharpe is not None:
                                   portfolio_options.append("シャープレシオ最大")
                               if custom_return_series is not None and len(custom_return_series) >= 12:
                                   portfolio_options.append("指定配分")
                               simulation_portfolio = st.radio(
-          '''
-          if 'portfolio_options.append("指定配分")' not in source:
-              replace_once(options_anchor, options_replacement, "MC option")
+          '''.replace("          ", "")
+              replace_once(old, new, "Monte Carlo option")
 
-          calculation_anchor = '''        if simulation_portfolio == "S&P 500のみ":
+          if 'simulation_portfolio == "指定配分"' not in source:
+              old = '''        if simulation_portfolio == "S&P 500のみ":
                       simulation_returns = returns[["S&P 500 ETF (SPY)"]].dropna()
                   elif simulation_portfolio == "ACWIのみ":
                       simulation_returns = returns[["全世界株式 ETF (ACWI)"]].dropna()
@@ -240,8 +201,8 @@ jobs:
                           )
 
                       portfolio_return_series = simulation_returns @ simulation_weights
-          '''
-          calculation_replacement = '''        if simulation_portfolio == "指定配分":
+          '''.replace("          ", "")
+              new = '''        if simulation_portfolio == "指定配分":
                       portfolio_return_series = custom_return_series.dropna()
                   else:
                       if simulation_portfolio == "S&P 500のみ":
@@ -262,9 +223,8 @@ jobs:
                       portfolio_return_series = simulation_returns @ simulation_weights
 
                   if len(portfolio_return_series) >= 12:
-          '''
-          if 'simulation_portfolio == "指定配分"' not in source:
-              replace_once(calculation_anchor, calculation_replacement, "MC calculation")
+          '''.replace("          ", "")
+              replace_once(old, new, "Monte Carlo calculation")
 
           compile(source, str(path), "exec")
           path.write_text(source, encoding="utf-8")
