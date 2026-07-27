@@ -4,6 +4,7 @@ from itertools import combinations
 import numpy as np
 import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
 import streamlit as st
 import yfinance as yf
 
@@ -69,18 +70,24 @@ def convert_to_jpy(usd_close: pd.Series, usd_jpy: pd.Series, name: str) -> pd.Se
     return (aligned["usd_price"] * aligned["usd_jpy"]).rename(name)
 
 
-def minimum_variance_portfolio(
+def portfolio_inputs(
     returns: pd.DataFrame, periods_per_year: int
-) -> tuple[pd.Series, float, float] | None:
-    """空売りなし・合計100%の制約で最小分散ポートフォリオを求める。"""
+) -> tuple[pd.DataFrame, pd.Series] | None:
+    """共通日付のリターンから年率共分散行列と期待リターンを作る。"""
     clean_returns = returns.dropna(how="any")
     if len(clean_returns) < 2 or clean_returns.shape[1] < 2:
         return None
 
     covariance = clean_returns.cov() * periods_per_year
     expected_returns = clean_returns.mean() * periods_per_year
-    asset_names = list(covariance.columns)
+    return covariance, expected_returns
 
+
+def minimum_variance_from_inputs(
+    covariance: pd.DataFrame, expected_returns: pd.Series
+) -> tuple[pd.Series, float, float] | None:
+    """空売りなし・合計100%の制約で最小分散ポートフォリオを求める。"""
+    asset_names = list(covariance.columns)
     best_weights = None
     best_variance = np.inf
     tolerance = 1e-10
@@ -119,6 +126,142 @@ def minimum_variance_portfolio(
     return weights, portfolio_return, portfolio_risk
 
 
+def efficient_frontier(
+    covariance: pd.DataFrame,
+    expected_returns: pd.Series,
+    points: int = 160,
+) -> pd.DataFrame:
+    """空売りなしの効率的フロンティアを資産部分集合の解析解から求める。"""
+    asset_names = list(covariance.columns)
+    target_returns = np.linspace(
+        float(expected_returns.min()), float(expected_returns.max()), points
+    )
+    rows = []
+    tolerance = 1e-8
+
+    for target in target_returns:
+        best_weights = None
+        best_variance = np.inf
+
+        for subset_size in range(2, len(asset_names) + 1):
+            for subset in combinations(range(len(asset_names)), subset_size):
+                subset_covariance = covariance.iloc[list(subset), list(subset)].to_numpy()
+                subset_returns = expected_returns.iloc[list(subset)].to_numpy()
+                inverse_covariance = np.linalg.pinv(subset_covariance)
+                ones = np.ones(subset_size)
+
+                a = float(ones @ inverse_covariance @ ones)
+                b = float(ones @ inverse_covariance @ subset_returns)
+                c = float(subset_returns @ inverse_covariance @ subset_returns)
+                system = np.array([[a, b], [b, c]])
+
+                if abs(np.linalg.det(system)) < 1e-12:
+                    continue
+
+                multipliers = np.linalg.solve(system, np.array([1.0, target]))
+                subset_weights = inverse_covariance @ (
+                    multipliers[0] * ones + multipliers[1] * subset_returns
+                )
+
+                if np.any(subset_weights < -tolerance):
+                    continue
+
+                subset_weights = np.clip(subset_weights, 0.0, None)
+                if subset_weights.sum() <= 0:
+                    continue
+                subset_weights = subset_weights / subset_weights.sum()
+                actual_return = float(subset_weights @ subset_returns)
+                if abs(actual_return - target) > 1e-5:
+                    continue
+
+                variance = float(subset_weights @ subset_covariance @ subset_weights)
+                if variance < best_variance:
+                    full_weights = np.zeros(len(asset_names))
+                    full_weights[list(subset)] = subset_weights
+                    best_weights = full_weights
+                    best_variance = variance
+
+        if best_weights is not None:
+            row = {
+                "年率リスク": float(np.sqrt(max(best_variance, 0.0))),
+                "年平均リターン": float(best_weights @ expected_returns.to_numpy()),
+            }
+            row.update(
+                {name: float(weight) for name, weight in zip(asset_names, best_weights)}
+            )
+            rows.append(row)
+
+    frontier = pd.DataFrame(rows)
+    if frontier.empty:
+        return frontier
+
+    frontier = frontier.sort_values("年平均リターン").drop_duplicates(
+        subset=["年平均リターン"]
+    )
+    return frontier.reset_index(drop=True)
+
+
+def maximum_sharpe_portfolio(
+    covariance: pd.DataFrame,
+    expected_returns: pd.Series,
+    risk_free_rate: float,
+) -> tuple[pd.Series, float, float, float] | None:
+    """空売りなし・合計100%の条件でシャープレシオ最大の配分を求める。"""
+    asset_names = list(covariance.columns)
+    best = None
+    tolerance = 1e-10
+
+    # 境界解を含めるため、全ての資産部分集合について接点ポートフォリオを調べる。
+    for subset_size in range(1, len(asset_names) + 1):
+        for subset in combinations(range(len(asset_names)), subset_size):
+            subset_covariance = covariance.iloc[list(subset), list(subset)].to_numpy()
+            subset_returns = expected_returns.iloc[list(subset)].to_numpy()
+
+            if subset_size == 1:
+                subset_weights = np.array([1.0])
+            else:
+                excess_returns = subset_returns - risk_free_rate
+                inverse_covariance = np.linalg.pinv(subset_covariance)
+                raw_weights = inverse_covariance @ excess_returns
+                denominator = float(raw_weights.sum())
+                if abs(denominator) <= tolerance:
+                    continue
+                subset_weights = raw_weights / denominator
+                if np.any(subset_weights < -tolerance):
+                    continue
+                subset_weights = np.clip(subset_weights, 0.0, None)
+                subset_weights = subset_weights / subset_weights.sum()
+
+            portfolio_return = float(subset_weights @ subset_returns)
+            variance = float(subset_weights @ subset_covariance @ subset_weights)
+            portfolio_risk = float(np.sqrt(max(variance, 0.0)))
+            if portfolio_risk <= tolerance:
+                continue
+
+            sharpe = (portfolio_return - risk_free_rate) / portfolio_risk
+            if best is None or sharpe > best[3]:
+                full_weights = np.zeros(len(asset_names))
+                full_weights[list(subset)] = subset_weights
+                best = (full_weights, portfolio_return, portfolio_risk, float(sharpe))
+
+    if best is None:
+        return None
+
+    weights = pd.Series(best[0], index=asset_names, name="配分比率")
+    return weights, best[1], best[2], best[3]
+
+
+def allocation_table(weights: pd.Series) -> pd.DataFrame:
+    allocation = (
+        weights.rename("配分比率")
+        .mul(100)
+        .reset_index()
+        .rename(columns={"index": "アセット"})
+    )
+    allocation["配分比率"] = allocation["配分比率"].round(2)
+    return allocation
+
+
 st.title("市場データ取得テスト")
 st.caption("Yahoo Finance から取得した各資産を、円建てまたはドル建てで比較します。")
 
@@ -147,6 +290,16 @@ rolling_years = st.sidebar.selectbox(
     format_func=lambda years: f"{years}年",
 )
 rolling_window = periods_per_year * rolling_years
+
+risk_free_rate_percent = st.sidebar.number_input(
+    "無リスク金利（年率・%）",
+    min_value=-5.0,
+    max_value=20.0,
+    value=0.0,
+    step=0.1,
+    help="シャープレシオ最大ポートフォリオの計算に使用します。",
+)
+risk_free_rate = risk_free_rate_percent / 100
 
 default_start = date(2008, 3, 28)
 
@@ -359,52 +512,181 @@ if run:
                     f"{rolling_years}年移動相関を計算するには、より長い取得期間が必要です。"
                 )
 
-            minimum_variance = minimum_variance_portfolio(returns, periods_per_year)
-            st.subheader("最小分散ポートフォリオ")
-            st.caption(
-                "設定期間のリターンから推定した共分散行列を使い、空売りなし・配分合計100%の条件で年率リスクが最小になる配分を計算します。"
-            )
-
-            if minimum_variance is not None:
-                weights, portfolio_return, portfolio_risk = minimum_variance
-                allocation = (
-                    weights.rename("配分比率")
-                    .mul(100)
-                    .reset_index()
-                    .rename(columns={"index": "アセット"})
+            inputs = portfolio_inputs(returns, periods_per_year)
+            if inputs is not None:
+                covariance, expected_returns = inputs
+                minimum_variance = minimum_variance_from_inputs(
+                    covariance, expected_returns
                 )
-                allocation["配分比率"] = allocation["配分比率"].round(2)
+                maximum_sharpe = maximum_sharpe_portfolio(
+                    covariance, expected_returns, risk_free_rate
+                )
+                frontier = efficient_frontier(covariance, expected_returns)
 
-                metric_col1, metric_col2 = st.columns(2)
-                metric_col1.metric("推定年平均リターン", f"{portfolio_return:.2%}")
-                metric_col2.metric("推定年率リスク", f"{portfolio_risk:.2%}")
+                st.subheader("効率的フロンティア")
+                st.caption(
+                    "空売りなし・配分合計100%の条件で、同じ期待リターンに対して年率リスクが最小となるポートフォリオを結んでいます。"
+                )
 
-                table_col, chart_col = st.columns([1, 1])
-                with table_col:
-                    st.dataframe(
-                        allocation.style.format({"配分比率": "{:.2f}%"}),
-                        use_container_width=True,
-                        hide_index=True,
+                frontier_fig = go.Figure()
+                if not frontier.empty:
+                    frontier_fig.add_trace(
+                        go.Scatter(
+                            x=frontier["年率リスク"] * 100,
+                            y=frontier["年平均リターン"] * 100,
+                            mode="lines",
+                            name="効率的フロンティア",
+                            hovertemplate="年率リスク: %{x:.2f}%<br>年平均リターン: %{y:.2f}%<extra></extra>",
+                        )
                     )
-                with chart_col:
-                    positive_allocation = allocation[allocation["配分比率"] > 0]
-                    allocation_fig = px.pie(
-                        positive_allocation,
-                        names="アセット",
-                        values="配分比率",
-                        title="最小分散ポートフォリオの配分",
-                        hole=0.35,
+
+                asset_risks = np.sqrt(np.diag(covariance.to_numpy())) * 100
+                asset_returns = expected_returns.to_numpy() * 100
+                frontier_fig.add_trace(
+                    go.Scatter(
+                        x=asset_risks,
+                        y=asset_returns,
+                        mode="markers+text",
+                        text=list(expected_returns.index),
+                        textposition="top center",
+                        name="各アセット",
+                        hovertemplate="%{text}<br>年率リスク: %{x:.2f}%<br>年平均リターン: %{y:.2f}%<extra></extra>",
                     )
-                    allocation_fig.update_traces(textposition="inside", textinfo="percent+label")
-                    st.plotly_chart(allocation_fig, use_container_width=True)
+                )
+
+                if minimum_variance is not None:
+                    min_weights, min_return, min_risk = minimum_variance
+                    frontier_fig.add_trace(
+                        go.Scatter(
+                            x=[min_risk * 100],
+                            y=[min_return * 100],
+                            mode="markers",
+                            marker={"size": 14, "symbol": "diamond"},
+                            name="最小分散",
+                            hovertemplate="最小分散<br>年率リスク: %{x:.2f}%<br>年平均リターン: %{y:.2f}%<extra></extra>",
+                        )
+                    )
+
+                if maximum_sharpe is not None:
+                    sharpe_weights, sharpe_return, sharpe_risk, sharpe_ratio = maximum_sharpe
+                    frontier_fig.add_trace(
+                        go.Scatter(
+                            x=[sharpe_risk * 100],
+                            y=[sharpe_return * 100],
+                            mode="markers",
+                            marker={"size": 15, "symbol": "star"},
+                            name="シャープレシオ最大",
+                            hovertemplate=(
+                                "シャープレシオ最大<br>年率リスク: %{x:.2f}%"
+                                "<br>年平均リターン: %{y:.2f}%"
+                                f"<br>シャープレシオ: {sharpe_ratio:.3f}<extra></extra>"
+                            ),
+                        )
+                    )
+
+                    max_x = max(
+                        float(frontier["年率リスク"].max() * 100)
+                        if not frontier.empty
+                        else sharpe_risk * 100,
+                        sharpe_risk * 100,
+                    )
+                    capital_market_x = np.linspace(0, max_x * 1.05, 100)
+                    capital_market_y = (
+                        risk_free_rate * 100 + sharpe_ratio * capital_market_x
+                    )
+                    frontier_fig.add_trace(
+                        go.Scatter(
+                            x=capital_market_x,
+                            y=capital_market_y,
+                            mode="lines",
+                            line={"dash": "dash"},
+                            name="資本市場線",
+                            hoverinfo="skip",
+                        )
+                    )
+
+                frontier_fig.update_layout(
+                    xaxis_title="年率リスク（%）",
+                    yaxis_title="推定年平均リターン（%）",
+                    hovermode="closest",
+                )
+                st.plotly_chart(frontier_fig, use_container_width=True)
+
+                if minimum_variance is not None:
+                    min_weights, min_return, min_risk = minimum_variance
+                    st.subheader("最小分散ポートフォリオ")
+                    min_col1, min_col2 = st.columns(2)
+                    min_col1.metric("推定年平均リターン", f"{min_return:.2%}")
+                    min_col2.metric("推定年率リスク", f"{min_risk:.2%}")
+
+                    min_allocation = allocation_table(min_weights)
+                    min_table_col, min_chart_col = st.columns([1, 1])
+                    with min_table_col:
+                        st.dataframe(
+                            min_allocation.style.format({"配分比率": "{:.2f}%"}),
+                            use_container_width=True,
+                            hide_index=True,
+                        )
+                    with min_chart_col:
+                        min_positive = min_allocation[min_allocation["配分比率"] > 0]
+                        min_fig = px.pie(
+                            min_positive,
+                            names="アセット",
+                            values="配分比率",
+                            title="最小分散ポートフォリオの配分",
+                            hole=0.35,
+                        )
+                        min_fig.update_traces(
+                            textposition="inside", textinfo="percent+label"
+                        )
+                        st.plotly_chart(min_fig, use_container_width=True)
+
+                if maximum_sharpe is not None:
+                    sharpe_weights, sharpe_return, sharpe_risk, sharpe_ratio = maximum_sharpe
+                    st.subheader("シャープレシオ最大ポートフォリオ")
+                    st.caption(
+                        f"無リスク金利を年率{risk_free_rate_percent:.1f}%として計算しています。"
+                    )
+                    sharpe_col1, sharpe_col2, sharpe_col3 = st.columns(3)
+                    sharpe_col1.metric("推定年平均リターン", f"{sharpe_return:.2%}")
+                    sharpe_col2.metric("推定年率リスク", f"{sharpe_risk:.2%}")
+                    sharpe_col3.metric("シャープレシオ", f"{sharpe_ratio:.3f}")
+
+                    sharpe_allocation = allocation_table(sharpe_weights)
+                    sharpe_table_col, sharpe_chart_col = st.columns([1, 1])
+                    with sharpe_table_col:
+                        st.dataframe(
+                            sharpe_allocation.style.format(
+                                {"配分比率": "{:.2f}%"}
+                            ),
+                            use_container_width=True,
+                            hide_index=True,
+                        )
+                    with sharpe_chart_col:
+                        sharpe_positive = sharpe_allocation[
+                            sharpe_allocation["配分比率"] > 0
+                        ]
+                        sharpe_fig = px.pie(
+                            sharpe_positive,
+                            names="アセット",
+                            values="配分比率",
+                            title="シャープレシオ最大ポートフォリオの配分",
+                            hole=0.35,
+                        )
+                        sharpe_fig.update_traces(
+                            textposition="inside", textinfo="percent+label"
+                        )
+                        st.plotly_chart(sharpe_fig, use_container_width=True)
 
                 st.caption(
-                    "推定値は選択した期間・頻度・表示通貨に依存します。将来のリターンやリスクを保証するものではありません。"
+                    "期待リターン・リスク・最適配分は選択期間の過去データからの推定値であり、将来の成果を保証するものではありません。"
                 )
             else:
-                st.info("最小分散ポートフォリオの計算に必要な共通データが不足しています。")
+                st.info("ポートフォリオ最適化に必要な共通データが不足しています。")
         else:
-            st.info("相関係数と最小分散ポートフォリオを表示するには、2つ以上のアセットを選択してください。")
+            st.info(
+                "相関係数とポートフォリオ最適化を表示するには、2つ以上のアセットを選択してください。"
+            )
 
         csv = prices.to_csv().encode("utf-8-sig")
         currency_code = "jpy" if currency == "円建て" else "usd"
