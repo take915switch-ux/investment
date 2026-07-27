@@ -1,4 +1,4 @@
-name: Add Sharpe ratios and hide price table
+name: Add Monte Carlo distribution comparison
 
 on:
   push:
@@ -30,95 +30,178 @@ jobs:
               source = source.replace(old, new, 1)
 
           replace_once(
-              '''        st.subheader(f"価格データ（{currency}）")
-                  st.dataframe(prices.tail(30), use_container_width=True)
-
-          '''.replace("          ", ""),
-              "",
-              "price table",
+              '''                simulation_count = st.select_slider(
+                      "試行回数", options=[500, 1000, 3000, 5000, 10000], value=5000
+                  )
+          ''',
+              '''                simulation_count = st.select_slider(
+                      "試行回数", options=[500, 1000, 3000, 5000, 10000], value=5000
+                  )
+                  distribution_year = st.slider(
+                      "確率分布を表示する時点（年後）",
+                      min_value=1,
+                      max_value=simulation_years,
+                      value=min(10, simulation_years),
+                  )
+          ''',
+              "distribution year control",
           )
 
           replace_once(
-              '''            stats_rows.append(
-                              {
-                                  "アセット": name,
-                                  "年平均リターン": annual_return,
-                                  "年率リスク": annual_risk,
-                              }
+              '''                simulation_portfolio = st.radio(
+                      "シミュレーション対象",
+                      portfolio_options,
+                      horizontal=False,
+                  )
+          ''',
+              '''                simulation_portfolio = st.radio(
+                      "シミュレーション対象",
+                      portfolio_options,
+                      horizontal=False,
+                  )
+                  distribution_portfolios = st.multiselect(
+                      "確率分布で比較する対象",
+                      portfolio_options,
+                      default=portfolio_options,
+                      help="選択した対象の確率分布を同じグラフ上に重ねて表示します。",
+                  )
+          ''',
+              "distribution portfolio selector",
+          )
+
+          replace_once(
+              '''            st.dataframe(
+                  terminal_summary.style.format(
+                      {f"{simulation_years}年後の資産額（{currency_unit}）": "{:,.0f}"}
+                  ),
+                  use_container_width=True,
+                  hide_index=True,
+              )
+              st.caption(
+                  "この結果は過去データに基づく確率的な試算です。税金・手数料・インフレ・相場構造の変化は考慮していません。"
+              )
+          ''',
+              '''            st.dataframe(
+                  terminal_summary.style.format(
+                      {f"{simulation_years}年後の資産額（{currency_unit}）": "{:,.0f}"}
+                  ),
+                  use_container_width=True,
+                  hide_index=True,
+              )
+
+              st.subheader(f"{distribution_year}年後の資産額の確率分布")
+              st.caption(
+                  "横軸は資産額、縦軸は確率密度です。曲線の面積が1になるように正規化しています。"
+              )
+
+              distribution_terminal_values = {}
+              for option in distribution_portfolios:
+                  if option == "指定配分":
+                      option_return_series = custom_return_series.dropna()
+                  else:
+                      if option == "S&P 500のみ":
+                          option_returns = returns[["S&P 500 ETF (SPY)"]].dropna()
+                      elif option == "ACWIのみ":
+                          option_returns = returns[["全世界株式 ETF (ACWI)"]].dropna()
+                      else:
+                          option_returns = returns.dropna(how="any")
+
+                      if option == "シャープレシオ最大" and maximum_sharpe is not None:
+                          option_weights = maximum_sharpe[0].reindex(
+                              option_returns.columns
+                          ).fillna(0)
+                      else:
+                          option_weights = pd.Series(
+                              1 / option_returns.shape[1], index=option_returns.columns
                           )
-          '''.replace("          ", ""),
-              '''            sharpe_ratio = (
-                              (annual_return - risk_free_rate) / annual_risk
-                              if annual_return is not None and annual_risk is not None and annual_risk > 0
-                              else None
+                      option_return_series = option_returns @ option_weights
+
+                  if len(option_return_series) < 12:
+                      continue
+
+                  option_annual_return = float(
+                      option_return_series.mean() * periods_per_year
+                  )
+                  option_annual_risk = float(
+                      option_return_series.std() * np.sqrt(periods_per_year)
+                  )
+                  option_paths = monte_carlo_simulation(
+                      initial_amount=initial_amount,
+                      monthly_contribution=monthly_contribution,
+                      years=distribution_year,
+                      simulations=simulation_count,
+                      annual_return=option_annual_return,
+                      annual_risk=option_annual_risk,
+                      seed=42,
+                  )
+                  distribution_terminal_values[option] = option_paths.iloc[-1].to_numpy()
+
+              if distribution_terminal_values:
+                  all_terminal_values = np.concatenate(
+                      list(distribution_terminal_values.values())
+                  )
+                  lower_bound = float(np.quantile(all_terminal_values, 0.005))
+                  upper_bound = float(np.quantile(all_terminal_values, 0.995))
+                  if upper_bound <= lower_bound:
+                      upper_bound = lower_bound + 1.0
+                  bin_edges = np.linspace(lower_bound, upper_bound, 81)
+                  bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
+
+                  distribution_fig = go.Figure()
+                  distribution_summary_rows = []
+                  for option, values in distribution_terminal_values.items():
+                      clipped_values = values[
+                          (values >= lower_bound) & (values <= upper_bound)
+                      ]
+                      density, _ = np.histogram(
+                          clipped_values, bins=bin_edges, density=True
+                      )
+                      distribution_fig.add_trace(
+                          go.Scatter(
+                              x=bin_centers,
+                              y=density,
+                              mode="lines",
+                              name=option,
+                              hovertemplate=(
+                                  f"{option}<br>資産額: %{{x:,.0f}} {currency_unit}"
+                                  "<br>確率密度: %{y:.3e}<extra></extra>"
+                              ),
                           )
-                          stats_rows.append(
-                              {
-                                  "アセット": name,
-                                  "年平均リターン": annual_return,
-                                  "年率リスク": annual_risk,
-                                  "シャープレシオ": sharpe_ratio,
-                              }
-                          )
-          '''.replace("          ", ""),
-              "asset Sharpe calculation",
-          )
+                      )
+                      distribution_summary_rows.append(
+                          {
+                              "対象": option,
+                              "下位10%": float(np.quantile(values, 0.10)),
+                              "中央値": float(np.quantile(values, 0.50)),
+                              "上位10%": float(np.quantile(values, 0.90)),
+                          }
+                      )
 
-          replace_once(
-              '''            pd.DataFrame(stats_rows).style.format(
-                              {"年平均リターン": "{:.2%}", "年率リスク": "{:.2%}"}
-                          ),
-          '''.replace("          ", ""),
-              '''            pd.DataFrame(stats_rows).style.format(
-                              {
-                                  "年平均リターン": "{:.2%}",
-                                  "年率リスク": "{:.2%}",
-                                  "シャープレシオ": "{:.3f}",
-                              }
-                          ),
-          '''.replace("          ", ""),
-              "asset table formatting",
-          )
+                  distribution_fig.update_layout(
+                      xaxis_title=f"{distribution_year}年後の資産額（{currency_unit}）",
+                      yaxis_title="確率密度",
+                      hovermode="x unified",
+                  )
+                  st.plotly_chart(distribution_fig, use_container_width=True)
+                  st.dataframe(
+                      pd.DataFrame(distribution_summary_rows).style.format(
+                          {
+                              "下位10%": "{:,.0f}",
+                              "中央値": "{:,.0f}",
+                              "上位10%": "{:,.0f}",
+                          }
+                      ),
+                      use_container_width=True,
+                      hide_index=True,
+                  )
+              else:
+                  st.info("確率分布を表示できる対象を1つ以上選択してください。")
 
-          replace_once(
-              '''        custom_annual_risk = None
-          '''.replace("          ", ""),
-              '''        custom_annual_risk = None
-                  custom_sharpe_ratio = None
-          '''.replace("          ", ""),
-              "custom Sharpe initialization",
-          )
-
-          replace_once(
-              '''                custom_annual_risk = float(
-                                      custom_return_series.std() * np.sqrt(periods_per_year)
-                                  )
-          '''.replace("          ", ""),
-              '''                custom_annual_risk = float(
-                                      custom_return_series.std() * np.sqrt(periods_per_year)
-                                  )
-                                  if custom_annual_risk > 0:
-                                      custom_sharpe_ratio = (
-                                          custom_annual_return - risk_free_rate
-                                      ) / custom_annual_risk
-          '''.replace("          ", ""),
-              "custom Sharpe calculation",
-          )
-
-          replace_once(
-              '''                    custom_col1, custom_col2 = st.columns(2)
-                              custom_col1.metric("推定年平均リターン", f"{custom_annual_return:.2%}")
-                              custom_col2.metric("推定年率リスク", f"{custom_annual_risk:.2%}")
-          '''.replace("          ", ""),
-              '''                    custom_col1, custom_col2, custom_col3 = st.columns(3)
-                              custom_col1.metric("推定年平均リターン", f"{custom_annual_return:.2%}")
-                              custom_col2.metric("推定年率リスク", f"{custom_annual_risk:.2%}")
-                              custom_col3.metric(
-                                  "シャープレシオ",
-                                  f"{custom_sharpe_ratio:.3f}" if custom_sharpe_ratio is not None else "計算不可",
-                              )
-          '''.replace("          ", ""),
-              "custom Sharpe display",
+              st.caption(
+                  "この結果は過去データに基づく確率的な試算です。税金・手数料・インフレ・相場構造の変化は考慮していません。"
+              )
+          ''',
+              "distribution chart block",
           )
 
           compile(source, str(path), "exec")
@@ -134,5 +217,5 @@ jobs:
             echo "No changes needed"
             exit 0
           fi
-          git commit -m "Show Sharpe ratios and remove price table"
+          git commit -m "Add overlaid Monte Carlo distribution chart"
           git push
