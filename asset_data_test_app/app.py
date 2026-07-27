@@ -17,12 +17,10 @@ ASSETS = {
     "米国総合債券 ETF (AGG)": "AGG",
     "全世界株式 ETF (ACWI)": "ACWI",
 }
-
 FX_TICKER = "JPY=X"
 
 
 def fetch_one(ticker: str, start: date, end: date, interval: str) -> pd.DataFrame:
-    # yfinance の end は指定日を含まないため、終了日の翌日を渡す。
     data = yf.download(
         ticker,
         start=start.isoformat(),
@@ -32,98 +30,43 @@ def fetch_one(ticker: str, start: date, end: date, interval: str) -> pd.DataFram
         progress=False,
         threads=False,
     )
-
     if data.empty:
         return data
-
-    # yfinance のバージョンにより列が MultiIndex になる場合に対応。
     if isinstance(data.columns, pd.MultiIndex):
         data.columns = data.columns.get_level_values(0)
-
     return data
 
 
 def annualized_statistics(
     close: pd.Series, periods_per_year: int
 ) -> tuple[float | None, float | None]:
-    """価格系列から算術平均ベースの年平均リターンと年率リスクを返す。"""
     returns = close.pct_change(fill_method=None).dropna()
     if returns.empty:
         return None, None
-
-    annual_return = float(returns.mean() * periods_per_year)
-    annual_risk = float(returns.std() * (periods_per_year**0.5))
-    return annual_return, annual_risk
+    return (
+        float(returns.mean() * periods_per_year),
+        float(returns.std() * np.sqrt(periods_per_year)),
+    )
 
 
 def convert_to_jpy(usd_close: pd.Series, usd_jpy: pd.Series, name: str) -> pd.Series:
-    """米ドル建て価格を、同日のUSD/JPYを用いて円換算する。"""
     aligned = pd.concat(
-        [usd_close.rename("usd_price"), usd_jpy.rename("usd_jpy")],
-        axis=1,
+        [usd_close.rename("usd_price"), usd_jpy.rename("usd_jpy")], axis=1
     ).sort_index()
-
-    # 為替が一部の日に欠ける場合は直前の値で補い、資産価格がある日のみ残す。
     aligned["usd_jpy"] = aligned["usd_jpy"].ffill()
     aligned = aligned.loc[usd_close.index].dropna(subset=["usd_price", "usd_jpy"])
-
     return (aligned["usd_price"] * aligned["usd_jpy"]).rename(name)
 
 
 def portfolio_inputs(
     returns: pd.DataFrame, periods_per_year: int
 ) -> tuple[pd.DataFrame, pd.Series] | None:
-    """共通日付のリターンから年率共分散行列と期待リターンを作る。"""
     clean_returns = returns.dropna(how="any")
     if len(clean_returns) < 2 or clean_returns.shape[1] < 2:
         return None
-
     covariance = clean_returns.cov() * periods_per_year
     expected_returns = clean_returns.mean() * periods_per_year
     return covariance, expected_returns
-
-
-def minimum_variance_from_inputs(
-    covariance: pd.DataFrame, expected_returns: pd.Series
-) -> tuple[pd.Series, float, float] | None:
-    """空売りなし・合計100%の制約で最小分散ポートフォリオを求める。"""
-    asset_names = list(covariance.columns)
-    best_weights = None
-    best_variance = np.inf
-    tolerance = 1e-10
-
-    # 最適解で比率が0になる資産にも対応するため、全ての資産部分集合を調べる。
-    for subset_size in range(1, len(asset_names) + 1):
-        for subset in combinations(range(len(asset_names)), subset_size):
-            subset_covariance = covariance.iloc[list(subset), list(subset)].to_numpy()
-            ones = np.ones(subset_size)
-            inverse_covariance = np.linalg.pinv(subset_covariance)
-            denominator = float(ones @ inverse_covariance @ ones)
-
-            if denominator <= tolerance:
-                continue
-
-            subset_weights = inverse_covariance @ ones / denominator
-            if np.any(subset_weights < -tolerance):
-                continue
-
-            subset_weights = np.clip(subset_weights, 0.0, None)
-            subset_weights = subset_weights / subset_weights.sum()
-            variance = float(subset_weights @ subset_covariance @ subset_weights)
-
-            if variance < best_variance:
-                full_weights = np.zeros(len(asset_names))
-                full_weights[list(subset)] = subset_weights
-                best_weights = full_weights
-                best_variance = variance
-
-    if best_weights is None:
-        return None
-
-    weights = pd.Series(best_weights, index=asset_names, name="配分比率")
-    portfolio_return = float(weights @ expected_returns)
-    portfolio_risk = float(np.sqrt(max(best_variance, 0.0)))
-    return weights, portfolio_return, portfolio_risk
 
 
 def efficient_frontier(
@@ -131,7 +74,6 @@ def efficient_frontier(
     expected_returns: pd.Series,
     points: int = 160,
 ) -> pd.DataFrame:
-    """空売りなしの効率的フロンティアを資産部分集合の解析解から求める。"""
     asset_names = list(covariance.columns)
     target_returns = np.linspace(
         float(expected_returns.min()), float(expected_returns.max()), points
@@ -154,7 +96,6 @@ def efficient_frontier(
                 b = float(ones @ inverse_covariance @ subset_returns)
                 c = float(subset_returns @ inverse_covariance @ subset_returns)
                 system = np.array([[a, b], [b, c]])
-
                 if abs(np.linalg.det(system)) < 1e-12:
                     continue
 
@@ -162,7 +103,6 @@ def efficient_frontier(
                 subset_weights = inverse_covariance @ (
                     multipliers[0] * ones + multipliers[1] * subset_returns
                 )
-
                 if np.any(subset_weights < -tolerance):
                     continue
 
@@ -170,6 +110,7 @@ def efficient_frontier(
                 if subset_weights.sum() <= 0:
                     continue
                 subset_weights = subset_weights / subset_weights.sum()
+
                 actual_return = float(subset_weights @ subset_returns)
                 if abs(actual_return - target) > 1e-5:
                     continue
@@ -194,11 +135,11 @@ def efficient_frontier(
     frontier = pd.DataFrame(rows)
     if frontier.empty:
         return frontier
-
-    frontier = frontier.sort_values("年平均リターン").drop_duplicates(
-        subset=["年平均リターン"]
+    return (
+        frontier.sort_values("年平均リターン")
+        .drop_duplicates(subset=["年平均リターン"])
+        .reset_index(drop=True)
     )
-    return frontier.reset_index(drop=True)
 
 
 def maximum_sharpe_portfolio(
@@ -206,12 +147,10 @@ def maximum_sharpe_portfolio(
     expected_returns: pd.Series,
     risk_free_rate: float,
 ) -> tuple[pd.Series, float, float, float] | None:
-    """空売りなし・合計100%の条件でシャープレシオ最大の配分を求める。"""
     asset_names = list(covariance.columns)
     best = None
     tolerance = 1e-10
 
-    # 境界解を含めるため、全ての資産部分集合について接点ポートフォリオを調べる。
     for subset_size in range(1, len(asset_names) + 1):
         for subset in combinations(range(len(asset_names)), subset_size):
             subset_covariance = covariance.iloc[list(subset), list(subset)].to_numpy()
@@ -246,7 +185,6 @@ def maximum_sharpe_portfolio(
 
     if best is None:
         return None
-
     weights = pd.Series(best[0], index=asset_names, name="配分比率")
     return weights, best[1], best[2], best[3]
 
@@ -262,23 +200,57 @@ def allocation_table(weights: pd.Series) -> pd.DataFrame:
     return allocation
 
 
+def rolling_correlations(
+    returns: pd.DataFrame,
+    years: int,
+    frequency: str,
+) -> pd.DataFrame:
+    """実際の暦期間を基準に、各組み合わせの移動相関を計算する。"""
+    result = {}
+    if not isinstance(returns.index, pd.DatetimeIndex):
+        returns = returns.copy()
+        returns.index = pd.to_datetime(returns.index)
+
+    if frequency == "日足":
+        window = f"{365 * years}D"
+        min_periods = max(60, int(252 * years * 0.7))
+    else:
+        window = 12 * years
+        min_periods = max(6, int(window * 0.7))
+
+    for asset_a, asset_b in combinations(returns.columns, 2):
+        pair = returns[[asset_a, asset_b]].dropna()
+        if len(pair) < min_periods:
+            continue
+
+        if frequency == "日足":
+            corr = pair[asset_a].rolling(
+                window=window, min_periods=min_periods
+            ).corr(pair[asset_b])
+        else:
+            corr = pair[asset_a].rolling(
+                window=window, min_periods=min_periods
+            ).corr(pair[asset_b])
+
+        result[f"{asset_a} × {asset_b}"] = corr
+
+    if not result:
+        return pd.DataFrame()
+    rolling = pd.DataFrame(result).dropna(how="all")
+    rolling.index.name = "Date"
+    return rolling
+
+
 st.title("市場データ取得テスト")
 st.caption("Yahoo Finance から取得した各資産を、円建てまたはドル建てで比較します。")
 
 st.sidebar.header("取得条件")
 selected_names = st.sidebar.multiselect(
-    "取得対象",
-    list(ASSETS.keys()),
-    default=list(ASSETS.keys()),
+    "取得対象", list(ASSETS.keys()), default=list(ASSETS.keys())
 )
-
 currency = st.sidebar.radio(
-    "表示通貨",
-    ["円建て", "ドル建て"],
-    index=0,
-    horizontal=True,
+    "表示通貨", ["円建て", "ドル建て"], index=0, horizontal=True
 )
-
 frequency = st.sidebar.radio("頻度", ["日足", "月足"], horizontal=True)
 interval = "1d" if frequency == "日足" else "1mo"
 periods_per_year = 252 if frequency == "日足" else 12
@@ -289,7 +261,6 @@ rolling_years = st.sidebar.selectbox(
     index=1,
     format_func=lambda years: f"{years}年",
 )
-rolling_window = periods_per_year * rolling_years
 
 risk_free_rate_percent = st.sidebar.number_input(
     "無リスク金利（年率・%）",
@@ -302,7 +273,6 @@ risk_free_rate_percent = st.sidebar.number_input(
 risk_free_rate = risk_free_rate_percent / 100
 
 default_start = date(2008, 3, 28)
-
 start_date = st.sidebar.date_input(
     "開始日",
     value=default_start,
@@ -315,7 +285,6 @@ end_date = st.sidebar.date_input(
     min_value=date(1990, 1, 1),
     max_value=date.today(),
 )
-
 run = st.sidebar.button("データ取得", type="primary", use_container_width=True)
 
 if run:
@@ -364,11 +333,11 @@ if run:
 
                 if currency == "円建て":
                     price_series = convert_to_jpy(usd_close, usd_jpy, name)
-                    if price_series.empty:
-                        raise ValueError("円換算後の価格データがありません。")
                 else:
                     price_series = usd_close.rename(name)
 
+                if price_series.empty:
+                    raise ValueError("価格データがありません。")
                 successful[name] = price_series
                 original_missing_counts[name] = int(df["Close"].isna().sum())
             except Exception as exc:
@@ -376,8 +345,8 @@ if run:
 
     currency_unit = "円" if currency == "円建て" else "ドル"
     latest_value_column = f"最新値（{currency_unit}）"
-
     results = []
+
     for name in selected_names:
         ticker = ASSETS[name]
         if name not in successful:
@@ -388,55 +357,71 @@ if run:
                     "ティッカー": ticker,
                     "結果": result,
                     "件数": 0,
-                    "開始": None,
-                    "終了": None,
-                    latest_value_column: None,
-                    "欠損数": None,
-                    "年平均リターン": None,
-                    "年率リスク": None,
+                    "開始日": "",
+                    "終了日": "",
+                    latest_value_column: np.nan,
+                    "欠損数": 0,
                     "エラー": error,
                 }
             )
             continue
 
-        close = successful[name]
-        annual_return, annual_risk = annualized_statistics(close, periods_per_year)
+        series = successful[name]
         results.append(
             {
                 "対象": name,
                 "ティッカー": ticker,
                 "結果": "成功",
-                "件数": len(close),
-                "開始": close.index.min(),
-                "終了": close.index.max(),
-                latest_value_column: round(float(close.iloc[-1]), 2),
-                "欠損数": original_missing_counts.get(name, 0),
-                "年平均リターン": (
-                    f"{annual_return:.2%}" if annual_return is not None else None
-                ),
-                "年率リスク": f"{annual_risk:.2%}" if annual_risk is not None else None,
+                "件数": len(series),
+                "開始日": series.index.min(),
+                "終了日": series.index.max(),
+                latest_value_column: float(series.iloc[-1]),
+                "欠損数": original_missing_counts[name],
                 "エラー": "",
             }
         )
 
-    st.subheader(f"取得結果一覧（{currency}）")
-    st.dataframe(pd.DataFrame(results), use_container_width=True, hide_index=True)
+    result_df = pd.DataFrame(results)
+    st.subheader("取得結果")
+    st.dataframe(result_df, use_container_width=True, hide_index=True)
 
     if successful:
         prices = pd.concat(successful.values(), axis=1).sort_index()
+        prices.index = pd.to_datetime(prices.index)
+        prices.index.name = "Date"
 
-        # 各アセットについて、設定期間内の最初の有効値を100として指数化する。
+        st.subheader(f"価格データ（{currency}）")
+        st.dataframe(prices.tail(30), use_container_width=True)
+
+        stats_rows = []
+        for name in prices.columns:
+            annual_return, annual_risk = annualized_statistics(
+                prices[name].dropna(), periods_per_year
+            )
+            stats_rows.append(
+                {
+                    "アセット": name,
+                    "年平均リターン": annual_return,
+                    "年率リスク": annual_risk,
+                }
+            )
+        stats_df = pd.DataFrame(stats_rows)
+        st.subheader("リターンとリスク")
+        st.dataframe(
+            stats_df.style.format(
+                {"年平均リターン": "{:.2%}", "年率リスク": "{:.2%}"}
+            ),
+            use_container_width=True,
+            hide_index=True,
+        )
+
         indexed_prices = prices.apply(
             lambda series: series / series.dropna().iloc[0] * 100
             if not series.dropna().empty
             else series
         )
-        indexed_prices.index.name = "Date"
-
         chart_data = indexed_prices.reset_index().melt(
-            id_vars="Date",
-            var_name="対象",
-            value_name="指数",
+            id_vars="Date", var_name="対象", value_name="指数"
         )
         fig = px.line(
             chart_data,
@@ -451,7 +436,6 @@ if run:
         st.plotly_chart(fig, use_container_width=True)
 
         if len(successful) >= 2:
-            # 価格水準ではなく、各期間の騰落率同士の相関係数を計算する。
             returns = prices.pct_change(fill_method=None)
             correlation = returns.corr().round(2)
 
@@ -466,58 +450,62 @@ if run:
                 use_container_width=True,
             )
 
-            rolling_series = {}
-            for asset_a, asset_b in combinations(successful.keys(), 2):
-                pair_returns = returns[[asset_a, asset_b]].dropna()
-                if len(pair_returns) < rolling_window:
-                    continue
-                rolling_series[f"{asset_a} × {asset_b}"] = (
-                    pair_returns[asset_a]
-                    .rolling(window=rolling_window, min_periods=rolling_window)
-                    .corr(pair_returns[asset_b])
+            rolling_corr = rolling_correlations(returns, rolling_years, frequency)
+            st.subheader("相関係数の推移")
+            if not rolling_corr.empty:
+                pair_options = list(rolling_corr.columns)
+                selected_pairs = st.multiselect(
+                    "表示する組み合わせ",
+                    pair_options,
+                    default=pair_options,
+                    key="rolling_pair_selector",
                 )
-
-            if rolling_series:
-                rolling_corr = pd.concat(rolling_series, axis=1)
-                rolling_corr.index.name = "Date"
-                rolling_chart_data = rolling_corr.reset_index().melt(
-                    id_vars="Date",
-                    var_name="組み合わせ",
-                    value_name="相関係数",
-                ).dropna(subset=["相関係数"])
-
-                rolling_fig = px.line(
-                    rolling_chart_data,
-                    x="Date",
-                    y="相関係数",
-                    color="組み合わせ",
-                    title=f"相関係数の推移（{rolling_years}年移動相関・{currency}・{frequency}リターン）",
-                    labels={
-                        "Date": "日付",
-                        "相関係数": "相関係数",
-                        "組み合わせ": "アセットの組み合わせ",
-                    },
-                )
-                rolling_fig.add_hline(y=0, line_dash="dash")
-                rolling_fig.update_yaxes(range=[-1, 1])
-                rolling_fig.update_layout(hovermode="x unified")
-
-                st.subheader("相関係数の推移")
-                st.caption(
-                    f"直近{rolling_years}年分のリターンを使って、各アセットの組み合わせごとの相関係数を計算しています。"
-                )
-                st.plotly_chart(rolling_fig, use_container_width=True)
+                if selected_pairs:
+                    rolling_chart_data = (
+                        rolling_corr[selected_pairs]
+                        .reset_index()
+                        .melt(
+                            id_vars="Date",
+                            var_name="組み合わせ",
+                            value_name="相関係数",
+                        )
+                        .dropna(subset=["相関係数"])
+                    )
+                    rolling_fig = px.line(
+                        rolling_chart_data,
+                        x="Date",
+                        y="相関係数",
+                        color="組み合わせ",
+                        title=(
+                            f"相関係数の推移（{rolling_years}年移動相関・"
+                            f"{currency}・{frequency}リターン）"
+                        ),
+                        labels={
+                            "Date": "日付",
+                            "相関係数": "相関係数",
+                            "組み合わせ": "アセットの組み合わせ",
+                        },
+                    )
+                    rolling_fig.add_hline(y=0, line_dash="dash")
+                    rolling_fig.update_yaxes(range=[-1, 1], dtick=0.2)
+                    rolling_fig.update_layout(
+                        hovermode="x unified",
+                        legend_title_text="組み合わせ",
+                    )
+                    st.caption(
+                        f"各時点からさかのぼった直近{rolling_years}年間のリターンで計算しています。"
+                    )
+                    st.plotly_chart(rolling_fig, use_container_width=True)
+                else:
+                    st.info("表示する組み合わせを1つ以上選択してください。")
             else:
                 st.info(
-                    f"{rolling_years}年移動相関を計算するには、より長い取得期間が必要です。"
+                    f"{rolling_years}年移動相関を計算できるだけの共通データがありません。"
                 )
 
             inputs = portfolio_inputs(returns, periods_per_year)
             if inputs is not None:
                 covariance, expected_returns = inputs
-                minimum_variance = minimum_variance_from_inputs(
-                    covariance, expected_returns
-                )
                 maximum_sharpe = maximum_sharpe_portfolio(
                     covariance, expected_returns, risk_free_rate
                 )
@@ -527,8 +515,8 @@ if run:
                 st.caption(
                     "空売りなし・配分合計100%の条件で、同じ期待リターンに対して年率リスクが最小となるポートフォリオを結んでいます。"
                 )
-
                 frontier_fig = go.Figure()
+
                 if not frontier.empty:
                     frontier_fig.add_trace(
                         go.Scatter(
@@ -536,7 +524,10 @@ if run:
                             y=frontier["年平均リターン"] * 100,
                             mode="lines",
                             name="効率的フロンティア",
-                            hovertemplate="年率リスク: %{x:.2f}%<br>年平均リターン: %{y:.2f}%<extra></extra>",
+                            hovertemplate=(
+                                "年率リスク: %{x:.2f}%<br>"
+                                "年平均リターン: %{y:.2f}%<extra></extra>"
+                            ),
                         )
                     )
 
@@ -550,22 +541,12 @@ if run:
                         text=list(expected_returns.index),
                         textposition="top center",
                         name="各アセット",
-                        hovertemplate="%{text}<br>年率リスク: %{x:.2f}%<br>年平均リターン: %{y:.2f}%<extra></extra>",
+                        hovertemplate=(
+                            "%{text}<br>年率リスク: %{x:.2f}%<br>"
+                            "年平均リターン: %{y:.2f}%<extra></extra>"
+                        ),
                     )
                 )
-
-                if minimum_variance is not None:
-                    min_weights, min_return, min_risk = minimum_variance
-                    frontier_fig.add_trace(
-                        go.Scatter(
-                            x=[min_risk * 100],
-                            y=[min_return * 100],
-                            mode="markers",
-                            marker={"size": 14, "symbol": "diamond"},
-                            name="最小分散",
-                            hovertemplate="最小分散<br>年率リスク: %{x:.2f}%<br>年平均リターン: %{y:.2f}%<extra></extra>",
-                        )
-                    )
 
                 if maximum_sharpe is not None:
                     sharpe_weights, sharpe_return, sharpe_risk, sharpe_ratio = maximum_sharpe
@@ -611,35 +592,6 @@ if run:
                     hovermode="closest",
                 )
                 st.plotly_chart(frontier_fig, use_container_width=True)
-
-                if minimum_variance is not None:
-                    min_weights, min_return, min_risk = minimum_variance
-                    st.subheader("最小分散ポートフォリオ")
-                    min_col1, min_col2 = st.columns(2)
-                    min_col1.metric("推定年平均リターン", f"{min_return:.2%}")
-                    min_col2.metric("推定年率リスク", f"{min_risk:.2%}")
-
-                    min_allocation = allocation_table(min_weights)
-                    min_table_col, min_chart_col = st.columns([1, 1])
-                    with min_table_col:
-                        st.dataframe(
-                            min_allocation.style.format({"配分比率": "{:.2f}%"}),
-                            use_container_width=True,
-                            hide_index=True,
-                        )
-                    with min_chart_col:
-                        min_positive = min_allocation[min_allocation["配分比率"] > 0]
-                        min_fig = px.pie(
-                            min_positive,
-                            names="アセット",
-                            values="配分比率",
-                            title="最小分散ポートフォリオの配分",
-                            hole=0.35,
-                        )
-                        min_fig.update_traces(
-                            textposition="inside", textinfo="percent+label"
-                        )
-                        st.plotly_chart(min_fig, use_container_width=True)
 
                 if maximum_sharpe is not None:
                     sharpe_weights, sharpe_return, sharpe_risk, sharpe_ratio = maximum_sharpe
