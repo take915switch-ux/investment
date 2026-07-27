@@ -676,6 +676,10 @@ if run:
                 )
             with mc_col3:
                 portfolio_options = ["均等配分"]
+                if "S&P 500 ETF (SPY)" in returns.columns:
+                    portfolio_options.append("S&P 500のみ")
+                if "全世界株式 ETF (ACWI)" in returns.columns:
+                    portfolio_options.append("ACWIのみ")
                 if maximum_sharpe is not None:
                     portfolio_options.append("シャープレシオ最大")
                 simulation_portfolio = st.radio(
@@ -684,16 +688,24 @@ if run:
                     horizontal=False,
                 )
 
-        clean_returns = returns.dropna(how="any")
-        if len(clean_returns) >= 12:
+        if simulation_portfolio == "S&P 500のみ":
+            simulation_returns = returns[["S&P 500 ETF (SPY)"]].dropna()
+        elif simulation_portfolio == "ACWIのみ":
+            simulation_returns = returns[["全世界株式 ETF (ACWI)"]].dropna()
+        else:
+            simulation_returns = returns.dropna(how="any")
+
+        if len(simulation_returns) >= 12:
             if simulation_portfolio == "シャープレシオ最大" and maximum_sharpe is not None:
-                simulation_weights = maximum_sharpe[0].reindex(clean_returns.columns).fillna(0)
+                simulation_weights = maximum_sharpe[0].reindex(
+                    simulation_returns.columns
+                ).fillna(0)
             else:
                 simulation_weights = pd.Series(
-                    1 / clean_returns.shape[1], index=clean_returns.columns
+                    1 / simulation_returns.shape[1], index=simulation_returns.columns
                 )
 
-            portfolio_return_series = clean_returns @ simulation_weights
+            portfolio_return_series = simulation_returns @ simulation_weights
             simulation_annual_return = float(
                 portfolio_return_series.mean() * periods_per_year
             )
@@ -816,7 +828,7 @@ if run:
                 "この結果は過去データに基づく確率的な試算です。税金・手数料・インフレ・相場構造の変化は考慮していません。"
             )
         else:
-            st.info("シミュレーションには、共通するリターンデータが12件以上必要です。")
+            st.info("シミュレーションには、対象となるリターンデータが12件以上必要です。")
 
         csv = prices.to_csv().encode("utf-8-sig")
         currency_code = "jpy" if currency == "円建て" else "usd"
