@@ -1096,10 +1096,10 @@ if run:
 
             if distribution_results:
                 combined_values = np.concatenate(list(distribution_results.values()))
-                lower_bound = float(np.quantile(combined_values, 0.005))
+                lower_bound = 0.0
                 upper_bound = float(np.quantile(combined_values, 0.995))
                 if upper_bound <= lower_bound:
-                    upper_bound = lower_bound + 1.0
+                    upper_bound = max(float(combined_values.max()), 1.0)
                 bin_edges = np.linspace(lower_bound, upper_bound, 101)
                 bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
 
@@ -1114,10 +1114,12 @@ if run:
                         bins=bin_edges,
                         density=True,
                     )
+                    plot_x = np.concatenate(([0.0], bin_centers, [upper_bound]))
+                    plot_y = np.concatenate(([0.0], density, [0.0]))
                     distribution_fig.add_trace(
                         go.Scatter(
-                            x=bin_centers,
-                            y=density,
+                            x=plot_x,
+                            y=plot_y,
                             mode="lines",
                             name=option,
                             hovertemplate=(
@@ -1151,6 +1153,7 @@ if run:
                     yaxis_title="確率密度",
                     hovermode="x unified",
                 )
+                distribution_fig.update_xaxes(range=[0, upper_bound])
                 st.plotly_chart(distribution_fig, use_container_width=True)
                 st.dataframe(
                     pd.DataFrame(distribution_rows).style.format(
