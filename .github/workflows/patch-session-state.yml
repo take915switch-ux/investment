@@ -1,4 +1,4 @@
-name: Set portfolio defaults
+name: Add Sharpe ratios and hide price table
 
 on:
   push:
@@ -15,32 +15,111 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Update app defaults
+      - name: Patch app.py
         run: |
           python - <<'PY'
           from pathlib import Path
 
           path = Path("asset_data_test_app/app.py")
           source = path.read_text(encoding="utf-8")
-          replacements = {
-              'value=0.0,\n    step=0.1,\n    help="シャープレシオ最大ポートフォリオと現金部分の計算に使用します。",':
-              'value=0.4,\n    step=0.1,\n    help="シャープレシオ最大ポートフォリオと現金部分の計算に使用します。",',
-              'custom_spy = st.sidebar.number_input("SPY（%）", 0.0, 100.0, 20.0, 1.0)':
-              'custom_spy = st.sidebar.number_input("SPY（%）", 0.0, 100.0, 0.0, 1.0)',
-              'custom_gld = st.sidebar.number_input("GLD（%）", 0.0, 100.0, 20.0, 1.0)':
-              'custom_gld = st.sidebar.number_input("GLD（%）", 0.0, 100.0, 10.0, 1.0)',
-              'custom_agg = st.sidebar.number_input("AGG（%）", 0.0, 100.0, 20.0, 1.0)':
-              'custom_agg = st.sidebar.number_input("AGG（%）", 0.0, 100.0, 25.0, 1.0)',
-              'custom_acwi = st.sidebar.number_input("ACWI（%）", 0.0, 100.0, 20.0, 1.0)':
-              'custom_acwi = st.sidebar.number_input("ACWI（%）", 0.0, 100.0, 45.0, 1.0)',
-              'custom_cash = st.sidebar.number_input("現金（%）", 0.0, 100.0, 20.0, 1.0)':
-              'custom_cash = st.sidebar.number_input("現金（%）", 0.0, 100.0, 20.0, 1.0)',
-          }
 
-          for old, new in replacements.items():
+          def replace_once(old: str, new: str, label: str) -> None:
+              global source
               if old not in source:
-                  raise SystemExit(f"Expected text not found: {old}")
+                  raise SystemExit(f"{label} block not found")
               source = source.replace(old, new, 1)
+
+          replace_once(
+              '''        st.subheader(f"価格データ（{currency}）")
+                  st.dataframe(prices.tail(30), use_container_width=True)
+
+          '''.replace("          ", ""),
+              "",
+              "price table",
+          )
+
+          replace_once(
+              '''            stats_rows.append(
+                              {
+                                  "アセット": name,
+                                  "年平均リターン": annual_return,
+                                  "年率リスク": annual_risk,
+                              }
+                          )
+          '''.replace("          ", ""),
+              '''            sharpe_ratio = (
+                              (annual_return - risk_free_rate) / annual_risk
+                              if annual_return is not None and annual_risk is not None and annual_risk > 0
+                              else None
+                          )
+                          stats_rows.append(
+                              {
+                                  "アセット": name,
+                                  "年平均リターン": annual_return,
+                                  "年率リスク": annual_risk,
+                                  "シャープレシオ": sharpe_ratio,
+                              }
+                          )
+          '''.replace("          ", ""),
+              "asset Sharpe calculation",
+          )
+
+          replace_once(
+              '''            pd.DataFrame(stats_rows).style.format(
+                              {"年平均リターン": "{:.2%}", "年率リスク": "{:.2%}"}
+                          ),
+          '''.replace("          ", ""),
+              '''            pd.DataFrame(stats_rows).style.format(
+                              {
+                                  "年平均リターン": "{:.2%}",
+                                  "年率リスク": "{:.2%}",
+                                  "シャープレシオ": "{:.3f}",
+                              }
+                          ),
+          '''.replace("          ", ""),
+              "asset table formatting",
+          )
+
+          replace_once(
+              '''        custom_annual_risk = None
+          '''.replace("          ", ""),
+              '''        custom_annual_risk = None
+                  custom_sharpe_ratio = None
+          '''.replace("          ", ""),
+              "custom Sharpe initialization",
+          )
+
+          replace_once(
+              '''                custom_annual_risk = float(
+                                      custom_return_series.std() * np.sqrt(periods_per_year)
+                                  )
+          '''.replace("          ", ""),
+              '''                custom_annual_risk = float(
+                                      custom_return_series.std() * np.sqrt(periods_per_year)
+                                  )
+                                  if custom_annual_risk > 0:
+                                      custom_sharpe_ratio = (
+                                          custom_annual_return - risk_free_rate
+                                      ) / custom_annual_risk
+          '''.replace("          ", ""),
+              "custom Sharpe calculation",
+          )
+
+          replace_once(
+              '''                    custom_col1, custom_col2 = st.columns(2)
+                              custom_col1.metric("推定年平均リターン", f"{custom_annual_return:.2%}")
+                              custom_col2.metric("推定年率リスク", f"{custom_annual_risk:.2%}")
+          '''.replace("          ", ""),
+              '''                    custom_col1, custom_col2, custom_col3 = st.columns(3)
+                              custom_col1.metric("推定年平均リターン", f"{custom_annual_return:.2%}")
+                              custom_col2.metric("推定年率リスク", f"{custom_annual_risk:.2%}")
+                              custom_col3.metric(
+                                  "シャープレシオ",
+                                  f"{custom_sharpe_ratio:.3f}" if custom_sharpe_ratio is not None else "計算不可",
+                              )
+          '''.replace("          ", ""),
+              "custom Sharpe display",
+          )
 
           compile(source, str(path), "exec")
           path.write_text(source, encoding="utf-8")
@@ -55,5 +134,5 @@ jobs:
             echo "No changes needed"
             exit 0
           fi
-          git commit -m "Update portfolio default allocations"
+          git commit -m "Show Sharpe ratios and remove price table"
           git push
