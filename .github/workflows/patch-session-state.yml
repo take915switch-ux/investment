@@ -19,60 +19,64 @@ jobs:
         run: |
           python - <<'PY'
           from pathlib import Path
+          import re
 
           path = Path("asset_data_test_app/app.py")
           source = path.read_text(encoding="utf-8")
 
-          old_options = '''                portfolio_options = ["均等配分"]
-                if maximum_sharpe is not None:
-                    portfolio_options.append("シャープレシオ最大")'''
-          new_options = '''                portfolio_options = ["均等配分"]
-                if "S&P 500 ETF (SPY)" in returns.columns:
-                    portfolio_options.append("S&P 500のみ")
-                if "全世界株式 ETF (ACWI)" in returns.columns:
-                    portfolio_options.append("ACWIのみ")
-                if maximum_sharpe is not None:
-                    portfolio_options.append("シャープレシオ最大")'''
+          options_pattern = re.compile(
+              r'(?P<indent>\s*)portfolio_options = \["均等配分"\]\n'
+              r'(?P=indent)if maximum_sharpe is not None:\n'
+              r'(?P=indent)    portfolio_options\.append\("シャープレシオ最大"\)'
+          )
+          options_replacement = '''\g<indent>portfolio_options = ["均等配分"]
+\g<indent>if "S&P 500 ETF (SPY)" in returns.columns:
+\g<indent>    portfolio_options.append("S&P 500のみ")
+\g<indent>if "全世界株式 ETF (ACWI)" in returns.columns:
+\g<indent>    portfolio_options.append("ACWIのみ")
+\g<indent>if maximum_sharpe is not None:
+\g<indent>    portfolio_options.append("シャープレシオ最大")'''
 
-          if new_options not in source:
-              if old_options not in source:
-                  raise SystemExit("portfolio options marker not found")
-              source = source.replace(old_options, new_options, 1)
+          if 'portfolio_options.append("S&P 500のみ")' not in source:
+              source, count = options_pattern.subn(options_replacement, source, count=1)
+              if count != 1:
+                  raise SystemExit("portfolio options block not found")
 
-          old_calc = '''        clean_returns = returns.dropna(how="any")
-        if len(clean_returns) >= 12:
-            if simulation_portfolio == "シャープレシオ最大" and maximum_sharpe is not None:
-                simulation_weights = maximum_sharpe[0].reindex(clean_returns.columns).fillna(0)
-            else:
-                simulation_weights = pd.Series(
-                    1 / clean_returns.shape[1], index=clean_returns.columns
-                )
+          calc_pattern = re.compile(
+              r'(?P<indent>\s*)clean_returns = returns\.dropna\(how="any"\)\n'
+              r'(?P=indent)if len\(clean_returns\) >= 12:\n'
+              r'(?P=indent)    if simulation_portfolio == "シャープレシオ最大" and maximum_sharpe is not None:\n'
+              r'(?P=indent)        simulation_weights = maximum_sharpe\[0\]\.reindex\(clean_returns\.columns\)\.fillna\(0\)\n'
+              r'(?P=indent)    else:\n'
+              r'(?P=indent)        simulation_weights = pd\.Series\(\n'
+              r'(?P=indent)            1 / clean_returns\.shape\[1\], index=clean_returns\.columns\n'
+              r'(?P=indent)        \)\n\n'
+              r'(?P=indent)    portfolio_return_series = clean_returns @ simulation_weights'
+          )
 
-            portfolio_return_series = clean_returns @ simulation_weights'''
+          calc_replacement = '''\g<indent>if simulation_portfolio == "S&P 500のみ":
+\g<indent>    simulation_returns = returns[["S&P 500 ETF (SPY)"]].dropna()
+\g<indent>elif simulation_portfolio == "ACWIのみ":
+\g<indent>    simulation_returns = returns[["全世界株式 ETF (ACWI)"]].dropna()
+\g<indent>else:
+\g<indent>    simulation_returns = returns.dropna(how="any")
 
-          new_calc = '''        if simulation_portfolio == "S&P 500のみ":
-            simulation_returns = returns[["S&P 500 ETF (SPY)"]].dropna()
-        elif simulation_portfolio == "ACWIのみ":
-            simulation_returns = returns[["全世界株式 ETF (ACWI)"]].dropna()
-        else:
-            simulation_returns = returns.dropna(how="any")
+\g<indent>if len(simulation_returns) >= 12:
+\g<indent>    if simulation_portfolio == "シャープレシオ最大" and maximum_sharpe is not None:
+\g<indent>        simulation_weights = maximum_sharpe[0].reindex(
+\g<indent>            simulation_returns.columns
+\g<indent>        ).fillna(0)
+\g<indent>    else:
+\g<indent>        simulation_weights = pd.Series(
+\g<indent>            1 / simulation_returns.shape[1], index=simulation_returns.columns
+\g<indent>        )
 
-        if len(simulation_returns) >= 12:
-            if simulation_portfolio == "シャープレシオ最大" and maximum_sharpe is not None:
-                simulation_weights = maximum_sharpe[0].reindex(
-                    simulation_returns.columns
-                ).fillna(0)
-            else:
-                simulation_weights = pd.Series(
-                    1 / simulation_returns.shape[1], index=simulation_returns.columns
-                )
+\g<indent>    portfolio_return_series = simulation_returns @ simulation_weights'''
 
-            portfolio_return_series = simulation_returns @ simulation_weights'''
-
-          if new_calc not in source:
-              if old_calc not in source:
-                  raise SystemExit("Monte Carlo calculation marker not found")
-              source = source.replace(old_calc, new_calc, 1)
+          if 'simulation_portfolio == "S&P 500のみ"' not in source:
+              source, count = calc_pattern.subn(calc_replacement, source, count=1)
+              if count != 1:
+                  raise SystemExit("Monte Carlo calculation block not found")
 
           compile(source, str(path), "exec")
           path.write_text(source, encoding="utf-8")
