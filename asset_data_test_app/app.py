@@ -1,4 +1,5 @@
 from datetime import date, timedelta
+from itertools import combinations
 
 import pandas as pd
 import plotly.express as px
@@ -85,6 +86,14 @@ currency = st.sidebar.radio(
 frequency = st.sidebar.radio("頻度", ["日足", "月足"], horizontal=True)
 interval = "1d" if frequency == "日足" else "1mo"
 periods_per_year = 252 if frequency == "日足" else 12
+
+rolling_years = st.sidebar.selectbox(
+    "相関係数の移動期間",
+    [1, 3, 5],
+    index=1,
+    format_func=lambda years: f"{years}年",
+)
+rolling_window = periods_per_year * rolling_years
 
 default_start = date(2008, 3, 28)
 
@@ -250,6 +259,52 @@ if run:
                 ),
                 use_container_width=True,
             )
+
+            rolling_series = {}
+            for asset_a, asset_b in combinations(successful.keys(), 2):
+                pair_returns = returns[[asset_a, asset_b]].dropna()
+                if len(pair_returns) < rolling_window:
+                    continue
+                rolling_series[f"{asset_a} × {asset_b}"] = (
+                    pair_returns[asset_a]
+                    .rolling(window=rolling_window, min_periods=rolling_window)
+                    .corr(pair_returns[asset_b])
+                )
+
+            if rolling_series:
+                rolling_corr = pd.concat(rolling_series, axis=1)
+                rolling_corr.index.name = "Date"
+                rolling_chart_data = rolling_corr.reset_index().melt(
+                    id_vars="Date",
+                    var_name="組み合わせ",
+                    value_name="相関係数",
+                ).dropna(subset=["相関係数"])
+
+                rolling_fig = px.line(
+                    rolling_chart_data,
+                    x="Date",
+                    y="相関係数",
+                    color="組み合わせ",
+                    title=f"相関係数の推移（{rolling_years}年移動相関・{currency}・{frequency}リターン）",
+                    labels={
+                        "Date": "日付",
+                        "相関係数": "相関係数",
+                        "組み合わせ": "アセットの組み合わせ",
+                    },
+                )
+                rolling_fig.add_hline(y=0, line_dash="dash")
+                rolling_fig.update_yaxes(range=[-1, 1])
+                rolling_fig.update_layout(hovermode="x unified")
+
+                st.subheader("相関係数の推移")
+                st.caption(
+                    f"直近{rolling_years}年分のリターンを使って、各アセットの組み合わせごとの相関係数を計算しています。"
+                )
+                st.plotly_chart(rolling_fig, use_container_width=True)
+            else:
+                st.info(
+                    f"{rolling_years}年移動相関を計算するには、より長い取得期間が必要です。"
+                )
         else:
             st.info("相関係数を表示するには、2つ以上のアセットを選択してください。")
 
