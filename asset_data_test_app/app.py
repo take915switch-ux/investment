@@ -818,7 +818,9 @@ if run:
                     min(10, simulation_years),
                 )
                 simulation_count = st.select_slider(
-                    "試行回数", options=[500, 1000, 3000, 5000, 10000], value=5000
+                    "試行回数",
+                    options=[500, 1000, 3000, 5000, 10000, 30000, 50000, 100000],
+                    value=30000,
                 )
             with mc_col3:
                 portfolio_options = ["均等配分"]
