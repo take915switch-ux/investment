@@ -235,6 +235,24 @@ if run:
         fig.update_layout(hovermode="x unified")
         st.plotly_chart(fig, use_container_width=True)
 
+        if len(successful) >= 2:
+            # 価格水準ではなく、各期間の騰落率同士の相関係数を計算する。
+            returns = prices.pct_change(fill_method=None)
+            correlation = returns.corr().round(2)
+
+            st.subheader(f"アセット間の相関係数（{currency}・{frequency}リターン）")
+            st.caption(
+                "各セルは、設定期間内の各アセットの騰落率について計算したPearsonの相関係数です。"
+            )
+            st.dataframe(
+                correlation.style.format("{:.2f}").background_gradient(
+                    cmap="RdBu_r", vmin=-1, vmax=1
+                ),
+                use_container_width=True,
+            )
+        else:
+            st.info("相関係数を表示するには、2つ以上のアセットを選択してください。")
+
         csv = prices.to_csv().encode("utf-8-sig")
         currency_code = "jpy" if currency == "円建て" else "usd"
         st.download_button(
