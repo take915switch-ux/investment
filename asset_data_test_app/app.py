@@ -20,6 +20,7 @@ ASSETS = {
 FX_TICKER = "JPY=X"
 
 
+@st.cache_data(ttl=3600, show_spinner=False)
 def fetch_one(ticker: str, start: date, end: date, interval: str) -> pd.DataFrame:
     data = yf.download(
         ticker,
@@ -313,7 +314,12 @@ end_date = st.sidebar.date_input(
     min_value=date(1990, 1, 1),
     max_value=date.today(),
 )
-run = st.sidebar.button("データ取得", type="primary", use_container_width=True)
+run_clicked = st.sidebar.button(
+    "データ取得", type="primary", use_container_width=True
+)
+if run_clicked:
+    st.session_state["market_data_loaded"] = True
+run = st.session_state.get("market_data_loaded", False)
 
 if run:
     if not selected_names:
