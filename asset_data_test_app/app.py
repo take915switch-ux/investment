@@ -573,6 +573,46 @@ if run:
         fig.update_layout(hovermode="x unified")
         st.plotly_chart(fig, use_container_width=True)
 
+        returns_for_yearly = prices.pct_change(fill_method=None)
+        positive_yearly_weights = custom_weights.drop("現金")
+        positive_yearly_weights = positive_yearly_weights[
+            positive_yearly_weights > 0
+        ]
+        missing_yearly_portfolio_assets = [
+            name
+            for name in positive_yearly_weights.index
+            if name not in returns_for_yearly.columns
+        ]
+        yearly_portfolio_returns = None
+
+        if custom_allocation_valid and not missing_yearly_portfolio_assets:
+            if positive_yearly_weights.empty:
+                portfolio_period_returns = pd.Series(
+                    0.0,
+                    index=returns_for_yearly.dropna(how="all").index,
+                )
+            else:
+                portfolio_base = returns_for_yearly[
+                    positive_yearly_weights.index
+                ].dropna(how="any")
+                portfolio_period_returns = portfolio_base.mul(
+                    positive_yearly_weights,
+                    axis=1,
+                ).sum(axis=1)
+
+            cash_period_return = (1 + risk_free_rate) ** (1 / periods_per_year) - 1
+            portfolio_period_returns = (
+                portfolio_period_returns
+                + custom_weights["現金"] * cash_period_return
+            )
+            yearly_portfolio_returns = (
+                (1 + portfolio_period_returns)
+                .resample("YE")
+                .prod()
+                .sub(1)
+                .mul(100)
+            )
+
         yearly_prices = prices.resample("YE").last()
         yearly_returns = yearly_prices.pct_change(fill_method=None) * 100
         yearly_returns.index = yearly_returns.index.year.astype(str)
@@ -583,9 +623,25 @@ if run:
             .dropna(subset=["リターン"])
         )
 
-        st.subheader("各アセットの年別リターン")
+        if yearly_portfolio_returns is not None:
+            yearly_portfolio_data = (
+                yearly_portfolio_returns.rename("リターン").reset_index()
+            )
+            yearly_portfolio_data["年"] = (
+                yearly_portfolio_data["Date"].dt.year.astype(str)
+            )
+            yearly_portfolio_data["アセット"] = "指定ポートフォリオ"
+            yearly_portfolio_data = yearly_portfolio_data[
+                ["年", "アセット", "リターン"]
+            ].dropna(subset=["リターン"])
+            yearly_return_data = pd.concat(
+                [yearly_return_data, yearly_portfolio_data],
+                ignore_index=True,
+            )
+
+        st.subheader("各アセットと指定ポートフォリオの年別リターン")
         st.caption(
-            "各年末の価格を前年末と比較した暦年リターンです。最新年は前年末から最新取得日までのリターンを表示します。"
+            "各アセットは年末価格を前年末と比較し、指定ポートフォリオは設定した配分へ各期間でリバランスしたリターンを年ごとに複利集計しています。最新年は年初から最新取得日までです。"
         )
         if not yearly_return_data.empty:
             yearly_return_fig = px.bar(
@@ -597,9 +653,9 @@ if run:
                 labels={
                     "年": "年",
                     "リターン": "年間リターン（%）",
-                    "アセット": "アセット",
+                    "アセット": "アセット／ポートフォリオ",
                 },
-                title=f"各アセットの年別リターン（{currency}）",
+                title=f"各アセットと指定ポートフォリオの年別リターン（{currency}）",
             )
             yearly_return_fig.add_hline(y=0, line_dash="dash")
             yearly_return_fig.update_layout(hovermode="x unified")
