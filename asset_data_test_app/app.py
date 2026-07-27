@@ -123,14 +123,14 @@ def efficient_frontier(
                     best_variance = variance
 
         if best_weights is not None:
-            row = {
-                "年率リスク": float(np.sqrt(max(best_variance, 0.0))),
-                "年平均リターン": float(best_weights @ expected_returns.to_numpy()),
-            }
-            row.update(
-                {name: float(weight) for name, weight in zip(asset_names, best_weights)}
+            rows.append(
+                {
+                    "年率リスク": float(np.sqrt(max(best_variance, 0.0))),
+                    "年平均リターン": float(
+                        best_weights @ expected_returns.to_numpy()
+                    ),
+                }
             )
-            rows.append(row)
 
     frontier = pd.DataFrame(rows)
     if frontier.empty:
@@ -205,7 +205,6 @@ def rolling_correlations(
     years: int,
     frequency: str,
 ) -> pd.DataFrame:
-    """実際の暦期間を基準に、各組み合わせの移動相関を計算する。"""
     result = {}
     if not isinstance(returns.index, pd.DatetimeIndex):
         returns = returns.copy()
@@ -222,23 +221,52 @@ def rolling_correlations(
         pair = returns[[asset_a, asset_b]].dropna()
         if len(pair) < min_periods:
             continue
-
-        if frequency == "日足":
-            corr = pair[asset_a].rolling(
-                window=window, min_periods=min_periods
-            ).corr(pair[asset_b])
-        else:
-            corr = pair[asset_a].rolling(
-                window=window, min_periods=min_periods
-            ).corr(pair[asset_b])
-
-        result[f"{asset_a} × {asset_b}"] = corr
+        result[f"{asset_a} × {asset_b}"] = (
+            pair[asset_a]
+            .rolling(window=window, min_periods=min_periods)
+            .corr(pair[asset_b])
+        )
 
     if not result:
         return pd.DataFrame()
     rolling = pd.DataFrame(result).dropna(how="all")
     rolling.index.name = "Date"
     return rolling
+
+
+def monte_carlo_simulation(
+    initial_amount: float,
+    monthly_contribution: float,
+    years: int,
+    simulations: int,
+    annual_return: float,
+    annual_risk: float,
+    seed: int = 42,
+) -> pd.DataFrame:
+    """幾何ブラウン運動を月次で近似し、積立込みの資産推移を返す。"""
+    months = years * 12
+    monthly_drift = (annual_return - 0.5 * annual_risk**2) / 12
+    monthly_volatility = annual_risk / np.sqrt(12)
+
+    rng = np.random.default_rng(seed)
+    shocks = rng.normal(size=(months, simulations))
+    gross_returns = np.exp(monthly_drift + monthly_volatility * shocks)
+
+    paths = np.empty((months + 1, simulations), dtype=float)
+    paths[0] = initial_amount
+    for month in range(1, months + 1):
+        paths[month] = paths[month - 1] * gross_returns[month - 1]
+        paths[month] += monthly_contribution
+
+    index = np.arange(months + 1) / 12
+    return pd.DataFrame(paths, index=index)
+
+
+def monte_carlo_summary(paths: pd.DataFrame) -> pd.DataFrame:
+    percentiles = paths.quantile([0.10, 0.25, 0.50, 0.75, 0.90], axis=1).T
+    percentiles.columns = ["10%", "25%", "中央値", "75%", "90%"]
+    percentiles.index.name = "経過年数"
+    return percentiles
 
 
 st.title("市場データ取得テスト")
@@ -331,13 +359,14 @@ if run:
                 if usd_close.empty:
                     raise ValueError("終値データがありません。")
 
-                if currency == "円建て":
-                    price_series = convert_to_jpy(usd_close, usd_jpy, name)
-                else:
-                    price_series = usd_close.rename(name)
-
+                price_series = (
+                    convert_to_jpy(usd_close, usd_jpy, name)
+                    if currency == "円建て"
+                    else usd_close.rename(name)
+                )
                 if price_series.empty:
                     raise ValueError("価格データがありません。")
+
                 successful[name] = price_series
                 original_missing_counts[name] = int(df["Close"].isna().sum())
             except Exception as exc:
@@ -381,9 +410,8 @@ if run:
             }
         )
 
-    result_df = pd.DataFrame(results)
     st.subheader("取得結果")
-    st.dataframe(result_df, use_container_width=True, hide_index=True)
+    st.dataframe(pd.DataFrame(results), use_container_width=True, hide_index=True)
 
     if successful:
         prices = pd.concat(successful.values(), axis=1).sort_index()
@@ -405,10 +433,10 @@ if run:
                     "年率リスク": annual_risk,
                 }
             )
-        stats_df = pd.DataFrame(stats_rows)
+
         st.subheader("リターンとリスク")
         st.dataframe(
-            stats_df.style.format(
+            pd.DataFrame(stats_rows).style.format(
                 {"年平均リターン": "{:.2%}", "年率リスク": "{:.2%}"}
             ),
             use_container_width=True,
@@ -435,10 +463,13 @@ if run:
         fig.update_layout(hovermode="x unified")
         st.plotly_chart(fig, use_container_width=True)
 
-        if len(successful) >= 2:
-            returns = prices.pct_change(fill_method=None)
-            correlation = returns.corr().round(2)
+        returns = prices.pct_change(fill_method=None)
+        maximum_sharpe = None
+        covariance = None
+        expected_returns = None
 
+        if len(successful) >= 2:
+            correlation = returns.corr().round(2)
             st.subheader(f"アセット間の相関係数（{currency}・{frequency}リターン）")
             st.caption(
                 "各セルは、設定期間内の各アセットの騰落率について計算したPearsonの相関係数です。"
@@ -488,16 +519,11 @@ if run:
                     )
                     rolling_fig.add_hline(y=0, line_dash="dash")
                     rolling_fig.update_yaxes(range=[-1, 1], dtick=0.2)
-                    rolling_fig.update_layout(
-                        hovermode="x unified",
-                        legend_title_text="組み合わせ",
-                    )
+                    rolling_fig.update_layout(hovermode="x unified")
                     st.caption(
                         f"各時点からさかのぼった直近{rolling_years}年間のリターンで計算しています。"
                     )
                     st.plotly_chart(rolling_fig, use_container_width=True)
-                else:
-                    st.info("表示する組み合わせを1つ以上選択してください。")
             else:
                 st.info(
                     f"{rolling_years}年移動相関を計算できるだけの共通データがありません。"
@@ -516,7 +542,6 @@ if run:
                     "空売りなし・配分合計100%の条件で、同じ期待リターンに対して年率リスクが最小となるポートフォリオを結んでいます。"
                 )
                 frontier_fig = go.Figure()
-
                 if not frontier.empty:
                     frontier_fig.add_trace(
                         go.Scatter(
@@ -524,10 +549,6 @@ if run:
                             y=frontier["年平均リターン"] * 100,
                             mode="lines",
                             name="効率的フロンティア",
-                            hovertemplate=(
-                                "年率リスク: %{x:.2f}%<br>"
-                                "年平均リターン: %{y:.2f}%<extra></extra>"
-                            ),
                         )
                     )
 
@@ -541,10 +562,6 @@ if run:
                         text=list(expected_returns.index),
                         textposition="top center",
                         name="各アセット",
-                        hovertemplate=(
-                            "%{text}<br>年率リスク: %{x:.2f}%<br>"
-                            "年平均リターン: %{y:.2f}%<extra></extra>"
-                        ),
                     )
                 )
 
@@ -557,14 +574,8 @@ if run:
                             mode="markers",
                             marker={"size": 15, "symbol": "star"},
                             name="シャープレシオ最大",
-                            hovertemplate=(
-                                "シャープレシオ最大<br>年率リスク: %{x:.2f}%"
-                                "<br>年平均リターン: %{y:.2f}%"
-                                f"<br>シャープレシオ: {sharpe_ratio:.3f}<extra></extra>"
-                            ),
                         )
                     )
-
                     max_x = max(
                         float(frontier["年率リスク"].max() * 100)
                         if not frontier.empty
@@ -630,15 +641,176 @@ if run:
                         )
                         st.plotly_chart(sharpe_fig, use_container_width=True)
 
-                st.caption(
-                    "期待リターン・リスク・最適配分は選択期間の過去データからの推定値であり、将来の成果を保証するものではありません。"
+        st.subheader("モンテカルロシミュレーションによる将来資産推移")
+        st.caption(
+            "選択期間の過去リターンとリスクが将来も続くと仮定し、月次の値動きをランダム生成します。"
+        )
+
+        with st.expander("シミュレーション条件", expanded=True):
+            mc_col1, mc_col2, mc_col3 = st.columns(3)
+            with mc_col1:
+                initial_default = 10_000_000 if currency == "円建て" else 100_000
+                initial_amount = st.number_input(
+                    f"初期資産（{currency_unit}）",
+                    min_value=0.0,
+                    value=float(initial_default),
+                    step=float(initial_default / 10),
                 )
+                contribution_default = 100_000 if currency == "円建て" else 1_000
+                monthly_contribution = st.number_input(
+                    f"毎月積立額（{currency_unit}）",
+                    min_value=0.0,
+                    value=float(contribution_default),
+                    step=float(contribution_default),
+                )
+            with mc_col2:
+                simulation_years = st.slider("予測期間（年）", 1, 50, 30)
+                simulation_count = st.select_slider(
+                    "試行回数", options=[500, 1000, 3000, 5000, 10000], value=5000
+                )
+            with mc_col3:
+                portfolio_options = ["均等配分"]
+                if maximum_sharpe is not None:
+                    portfolio_options.append("シャープレシオ最大")
+                simulation_portfolio = st.radio(
+                    "シミュレーション対象",
+                    portfolio_options,
+                    horizontal=False,
+                )
+
+        clean_returns = returns.dropna(how="any")
+        if len(clean_returns) >= 12:
+            if simulation_portfolio == "シャープレシオ最大" and maximum_sharpe is not None:
+                simulation_weights = maximum_sharpe[0].reindex(clean_returns.columns).fillna(0)
             else:
-                st.info("ポートフォリオ最適化に必要な共通データが不足しています。")
-        else:
-            st.info(
-                "相関係数とポートフォリオ最適化を表示するには、2つ以上のアセットを選択してください。"
+                simulation_weights = pd.Series(
+                    1 / clean_returns.shape[1], index=clean_returns.columns
+                )
+
+            portfolio_return_series = clean_returns @ simulation_weights
+            simulation_annual_return = float(
+                portfolio_return_series.mean() * periods_per_year
             )
+            simulation_annual_risk = float(
+                portfolio_return_series.std() * np.sqrt(periods_per_year)
+            )
+
+            mc_paths = monte_carlo_simulation(
+                initial_amount=initial_amount,
+                monthly_contribution=monthly_contribution,
+                years=simulation_years,
+                simulations=simulation_count,
+                annual_return=simulation_annual_return,
+                annual_risk=simulation_annual_risk,
+            )
+            mc_summary = monte_carlo_summary(mc_paths)
+            terminal_values = mc_paths.iloc[-1]
+            total_contributed = initial_amount + monthly_contribution * simulation_years * 12
+            loss_probability = float((terminal_values < total_contributed).mean())
+
+            metric1, metric2, metric3, metric4 = st.columns(4)
+            metric1.metric("前提リターン", f"{simulation_annual_return:.2%}")
+            metric2.metric("前提リスク", f"{simulation_annual_risk:.2%}")
+            metric3.metric(
+                f"{simulation_years}年後の中央値",
+                f"{terminal_values.median():,.0f} {currency_unit}",
+            )
+            metric4.metric("元本割れ確率", f"{loss_probability:.1%}")
+
+            mc_fig = go.Figure()
+            mc_fig.add_trace(
+                go.Scatter(
+                    x=mc_summary.index,
+                    y=mc_summary["90%"],
+                    mode="lines",
+                    line={"width": 0},
+                    showlegend=False,
+                    hoverinfo="skip",
+                )
+            )
+            mc_fig.add_trace(
+                go.Scatter(
+                    x=mc_summary.index,
+                    y=mc_summary["10%"],
+                    mode="lines",
+                    fill="tonexty",
+                    name="10〜90%範囲",
+                    line={"width": 0},
+                    hovertemplate="10%点: %{y:,.0f}<extra></extra>",
+                )
+            )
+            mc_fig.add_trace(
+                go.Scatter(
+                    x=mc_summary.index,
+                    y=mc_summary["75%"],
+                    mode="lines",
+                    line={"width": 0},
+                    showlegend=False,
+                    hoverinfo="skip",
+                )
+            )
+            mc_fig.add_trace(
+                go.Scatter(
+                    x=mc_summary.index,
+                    y=mc_summary["25%"],
+                    mode="lines",
+                    fill="tonexty",
+                    name="25〜75%範囲",
+                    line={"width": 0},
+                    hovertemplate="25%点: %{y:,.0f}<extra></extra>",
+                )
+            )
+            mc_fig.add_trace(
+                go.Scatter(
+                    x=mc_summary.index,
+                    y=mc_summary["中央値"],
+                    mode="lines",
+                    name="中央値",
+                    hovertemplate="%{x:.1f}年後<br>%{y:,.0f}<extra></extra>",
+                )
+            )
+            contribution_line = initial_amount + monthly_contribution * 12 * mc_summary.index
+            mc_fig.add_trace(
+                go.Scatter(
+                    x=mc_summary.index,
+                    y=contribution_line,
+                    mode="lines",
+                    line={"dash": "dash"},
+                    name="累計元本",
+                    hovertemplate="累計元本: %{y:,.0f}<extra></extra>",
+                )
+            )
+            mc_fig.update_layout(
+                xaxis_title="経過年数",
+                yaxis_title=f"資産額（{currency_unit}）",
+                hovermode="x unified",
+            )
+            st.plotly_chart(mc_fig, use_container_width=True)
+
+            terminal_summary = pd.DataFrame(
+                {
+                    "ケース": ["下位10%", "下位25%", "中央値", "上位25%", "上位10%"],
+                    f"{simulation_years}年後の資産額（{currency_unit}）": [
+                        terminal_values.quantile(0.10),
+                        terminal_values.quantile(0.25),
+                        terminal_values.quantile(0.50),
+                        terminal_values.quantile(0.75),
+                        terminal_values.quantile(0.90),
+                    ],
+                }
+            )
+            st.dataframe(
+                terminal_summary.style.format(
+                    {f"{simulation_years}年後の資産額（{currency_unit}）": "{:,.0f}"}
+                ),
+                use_container_width=True,
+                hide_index=True,
+            )
+            st.caption(
+                "この結果は過去データに基づく確率的な試算です。税金・手数料・インフレ・相場構造の変化は考慮していません。"
+            )
+        else:
+            st.info("シミュレーションには、共通するリターンデータが12件以上必要です。")
 
         csv = prices.to_csv().encode("utf-8-sig")
         currency_code = "jpy" if currency == "円建て" else "usd"
