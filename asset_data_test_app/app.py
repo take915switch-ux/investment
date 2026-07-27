@@ -295,7 +295,7 @@ risk_free_rate_percent = st.sidebar.number_input(
     "無リスク金利（年率・%）",
     min_value=-5.0,
     max_value=20.0,
-    value=0.0,
+    value=0.4,
     step=0.1,
     help="シャープレシオ最大ポートフォリオと現金部分の計算に使用します。",
 )
@@ -303,10 +303,10 @@ risk_free_rate = risk_free_rate_percent / 100
 
 st.sidebar.subheader("指定ポートフォリオ")
 st.sidebar.caption("SPY・GLD・AGG・ACWI・現金の合計を100%にしてください。")
-custom_spy = st.sidebar.number_input("SPY（%）", 0.0, 100.0, 20.0, 1.0)
-custom_gld = st.sidebar.number_input("GLD（%）", 0.0, 100.0, 20.0, 1.0)
-custom_agg = st.sidebar.number_input("AGG（%）", 0.0, 100.0, 20.0, 1.0)
-custom_acwi = st.sidebar.number_input("ACWI（%）", 0.0, 100.0, 20.0, 1.0)
+custom_spy = st.sidebar.number_input("SPY（%）", 0.0, 100.0, 0.0, 1.0)
+custom_gld = st.sidebar.number_input("GLD（%）", 0.0, 100.0, 10.0, 1.0)
+custom_agg = st.sidebar.number_input("AGG（%）", 0.0, 100.0, 25.0, 1.0)
+custom_acwi = st.sidebar.number_input("ACWI（%）", 0.0, 100.0, 45.0, 1.0)
 custom_cash = st.sidebar.number_input("現金（%）", 0.0, 100.0, 20.0, 1.0)
 custom_total = custom_spy + custom_gld + custom_agg + custom_acwi + custom_cash
 st.sidebar.metric("配分合計", f"{custom_total:.1f}%")
