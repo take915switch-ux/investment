@@ -1,4 +1,4 @@
-name: Patch Streamlit session state
+name: Extend Monte Carlo portfolio choices
 
 on:
   push:
@@ -23,25 +23,56 @@ jobs:
           path = Path("asset_data_test_app/app.py")
           source = path.read_text(encoding="utf-8")
 
-          fetch_marker = "def fetch_one(ticker: str, start: date, end: date, interval: str) -> pd.DataFrame:"
-          cached_fetch = "@st.cache_data(ttl=3600, show_spinner=False)\n" + fetch_marker
-          if cached_fetch not in source:
-              if fetch_marker not in source:
-                  raise SystemExit("fetch_one marker not found")
-              source = source.replace(fetch_marker, cached_fetch, 1)
+          old_options = '''                portfolio_options = ["均等配分"]
+                if maximum_sharpe is not None:
+                    portfolio_options.append("シャープレシオ最大")'''
+          new_options = '''                portfolio_options = ["均等配分"]
+                if "S&P 500 ETF (SPY)" in returns.columns:
+                    portfolio_options.append("S&P 500のみ")
+                if "全世界株式 ETF (ACWI)" in returns.columns:
+                    portfolio_options.append("ACWIのみ")
+                if maximum_sharpe is not None:
+                    portfolio_options.append("シャープレシオ最大")'''
 
-          old_button = 'run = st.sidebar.button("データ取得", type="primary", use_container_width=True)'
-          new_button = '''run_clicked = st.sidebar.button(
-              "データ取得", type="primary", use_container_width=True
-          )
-          if run_clicked:
-              st.session_state["market_data_loaded"] = True
-          run = st.session_state.get("market_data_loaded", False)'''
+          if new_options not in source:
+              if old_options not in source:
+                  raise SystemExit("portfolio options marker not found")
+              source = source.replace(old_options, new_options, 1)
 
-          if new_button not in source:
-              if old_button not in source:
-                  raise SystemExit("data button marker not found")
-              source = source.replace(old_button, new_button, 1)
+          old_calc = '''        clean_returns = returns.dropna(how="any")
+        if len(clean_returns) >= 12:
+            if simulation_portfolio == "シャープレシオ最大" and maximum_sharpe is not None:
+                simulation_weights = maximum_sharpe[0].reindex(clean_returns.columns).fillna(0)
+            else:
+                simulation_weights = pd.Series(
+                    1 / clean_returns.shape[1], index=clean_returns.columns
+                )
+
+            portfolio_return_series = clean_returns @ simulation_weights'''
+
+          new_calc = '''        if simulation_portfolio == "S&P 500のみ":
+            simulation_returns = returns[["S&P 500 ETF (SPY)"]].dropna()
+        elif simulation_portfolio == "ACWIのみ":
+            simulation_returns = returns[["全世界株式 ETF (ACWI)"]].dropna()
+        else:
+            simulation_returns = returns.dropna(how="any")
+
+        if len(simulation_returns) >= 12:
+            if simulation_portfolio == "シャープレシオ最大" and maximum_sharpe is not None:
+                simulation_weights = maximum_sharpe[0].reindex(
+                    simulation_returns.columns
+                ).fillna(0)
+            else:
+                simulation_weights = pd.Series(
+                    1 / simulation_returns.shape[1], index=simulation_returns.columns
+                )
+
+            portfolio_return_series = simulation_returns @ simulation_weights'''
+
+          if new_calc not in source:
+              if old_calc not in source:
+                  raise SystemExit("Monte Carlo calculation marker not found")
+              source = source.replace(old_calc, new_calc, 1)
 
           compile(source, str(path), "exec")
           path.write_text(source, encoding="utf-8")
@@ -56,5 +87,5 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add asset_data_test_app/app.py
-          git commit -m "Persist fetched data across Streamlit reruns"
+          git commit -m "Add SPY and ACWI Monte Carlo options"
           git push
