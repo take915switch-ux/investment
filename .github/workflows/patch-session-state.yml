@@ -1,0 +1,60 @@
+name: Patch Streamlit session state
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/patch-session-state.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Patch app.py
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path("asset_data_test_app/app.py")
+          source = path.read_text(encoding="utf-8")
+
+          fetch_marker = "def fetch_one(ticker: str, start: date, end: date, interval: str) -> pd.DataFrame:"
+          cached_fetch = "@st.cache_data(ttl=3600, show_spinner=False)\n" + fetch_marker
+          if cached_fetch not in source:
+              if fetch_marker not in source:
+                  raise SystemExit("fetch_one marker not found")
+              source = source.replace(fetch_marker, cached_fetch, 1)
+
+          old_button = 'run = st.sidebar.button("データ取得", type="primary", use_container_width=True)'
+          new_button = '''run_clicked = st.sidebar.button(
+              "データ取得", type="primary", use_container_width=True
+          )
+          if run_clicked:
+              st.session_state["market_data_loaded"] = True
+          run = st.session_state.get("market_data_loaded", False)'''
+
+          if new_button not in source:
+              if old_button not in source:
+                  raise SystemExit("data button marker not found")
+              source = source.replace(old_button, new_button, 1)
+
+          compile(source, str(path), "exec")
+          path.write_text(source, encoding="utf-8")
+          PY
+
+      - name: Commit patch
+        run: |
+          if git diff --quiet; then
+            echo "No changes needed"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add asset_data_test_app/app.py
+          git commit -m "Persist fetched data across Streamlit reruns"
+          git push
