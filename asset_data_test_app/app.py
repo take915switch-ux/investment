@@ -287,7 +287,7 @@ periods_per_year = 252 if frequency == "日足" else 12
 rolling_years = st.sidebar.selectbox(
     "相関係数の移動期間",
     [1, 3, 5],
-    index=1,
+    index=0,
     format_func=lambda years: f"{years}年",
 )
 
@@ -343,7 +343,7 @@ run_clicked = st.sidebar.button(
 )
 if run_clicked:
     st.session_state["market_data_loaded"] = True
-run = st.session_state.get("market_data_loaded", False)
+run = st.session_state.get("market_data_loaded", True)
 
 if run:
     if not selected_names:
