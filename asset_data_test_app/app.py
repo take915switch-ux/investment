@@ -670,9 +670,15 @@ if run:
                     )
                     rolling_fig.add_hline(y=0, line_dash="dash")
                     rolling_fig.update_yaxes(range=[-1, 1], dtick=0.2)
-                    rolling_fig.update_layout(hovermode="x unified")
+                    rolling_fig.update_layout(
+                        hovermode="x unified",
+                        height=520,
+                        showlegend=False,
+                        margin={"l": 50, "r": 15, "t": 70, "b": 55},
+                        title={"font": {"size": 16}},
+                    )
                     st.caption(
-                        f"各時点からさかのぼった直近{rolling_years}年間のリターンで計算しています。"
+                        f"各時点からさかのぼった直近{rolling_years}年間のリターンで計算しています。線の名称はグラフをタップすると確認できます。"
                     )
                     st.plotly_chart(rolling_fig, use_container_width=True)
             else:
